@@ -1,0 +1,196 @@
+<div class="page">
+  <div class="page-header">
+    <div>
+      <h1 class="page-title">Queries</h1>
+      <p class="page-subtitle">
+        {{ queries().length }} quer{{ queries().length === 1 ? 'y' : 'ies' }} saved -- matched against
+        confirmed tracked objects via open-vocabulary detection
+      </p>
+    </div>
+    @if (!showAddForm()) {
+      <button type="button" class="btn-primary" (click)="openAddForm()">
+        <app-icon name="plus" [size]="16" />
+        Add query
+      </button>
+    }
+  </div>
+
+  @if (justDeleted()) {
+    <div class="restart-banner">
+      <app-icon name="checkCircle" [size]="16" />
+      Query removed. Restart <code>python -m mirage</code> for this to take effect.
+    </div>
+  }
+  @if (justAdded()) {
+    <div class="restart-banner">
+      <app-icon name="checkCircle" [size]="16" />
+      @if (editingQueryId()) {
+        Query updated. Restart <code>python -m mirage</code> for this to take effect.
+      } @else {
+        Query added. Restart <code>python -m mirage</code> for this to take effect.
+      }
+    </div>
+  }
+
+  @if (showAddForm()) {
+    <div class="add-form">
+      <div class="field">
+        <span>Description</span>
+        <input
+          type="text"
+          [ngModel]="text()"
+          (ngModelChange)="text.set($event)"
+          placeholder="e.g. person carrying a red backpack"
+        />
+      </div>
+      <div class="field">
+        <span>Cameras</span>
+        @if (cameras().length === 0) {
+          <p class="hint">No cameras configured yet.</p>
+        } @else {
+          <div class="camera-checkboxes">
+            @for (camera of cameras(); track camera.name) {
+              <label class="checkbox-field">
+                <input
+                  type="checkbox"
+                  [checked]="selectedCameras().includes(camera.name)"
+                  (change)="toggleCamera(camera.name)"
+                />
+                {{ camera.name }}
+              </label>
+            }
+          </div>
+        }
+        <p class="hint">Leave every camera unchecked to apply this query to all cameras.</p>
+      </div>
+      <label class="checkbox-field">
+        <input type="checkbox" [checked]="enabled()" (change)="enabled.set(!enabled())" />
+        Enabled
+      </label>
+
+      @if (saveError()) {
+        <div class="inline-error">{{ saveError() }}</div>
+      }
+
+      <div class="form-actions">
+        <button type="button" class="text-btn" (click)="cancelAddForm()" [disabled]="saving()">Cancel</button>
+        <button type="button" class="btn-primary" (click)="save()" [disabled]="!canSubmit() || saving()">
+          @if (saving()) {
+            <span class="spinner small"></span>
+          } @else if (editingQueryId()) {
+            Save changes
+          } @else {
+            Add query
+          }
+        </button>
+      </div>
+    </div>
+  }
+
+  @if (loading()) {
+    <div class="empty-state">
+      <span class="eyebrow">loading</span>
+    </div>
+  } @else if (loadError()) {
+    <div class="empty-state">
+      <app-icon name="wifiOff" [size]="24" />
+      <p>{{ loadError() }}</p>
+    </div>
+  } @else if (queries().length === 0) {
+    <div class="empty-state">
+      <span class="eyebrow">no queries configured</span>
+      <p>Add a query to get started.</p>
+    </div>
+  } @else {
+    <div class="query-list">
+      @for (query of queries(); track query.id) {
+        <div class="query-row">
+          <app-icon name="search" [size]="20" />
+          <div class="query-info">
+            <span class="query-text">{{ query.text }}</span>
+            <span class="query-meta">
+              {{ query.cameras.length === 0 ? 'all cameras' : query.cameras.join(', ') }}
+              @if (!query.enabled) {
+                &middot; disabled
+              }
+            </span>
+          </div>
+
+          @if (pendingDelete() === query.id) {
+            <div class="delete-confirm">
+              <span>Delete this query?</span>
+              <button type="button" class="text-btn danger" (click)="deleteQuery(query.id)" [disabled]="deleting()">
+                @if (deleting()) {
+                  <span class="spinner small"></span>
+                } @else {
+                  Confirm
+                }
+              </button>
+              <button type="button" class="text-btn" (click)="cancelDelete()" [disabled]="deleting()">Cancel</button>
+            </div>
+          } @else {
+            <div class="query-actions">
+              <button type="button" class="icon-btn" (click)="editQuery(query)" title="Edit">
+                <app-icon name="pencil" [size]="16" />
+              </button>
+              <button type="button" class="icon-btn danger" (click)="confirmDelete(query.id)" title="Delete">
+                <app-icon name="trash" [size]="16" />
+              </button>
+            </div>
+          }
+        </div>
+      }
+    </div>
+  }
+
+  @if (deleteError()) {
+    <div class="inline-error">{{ deleteError() }}</div>
+  }
+
+  <div class="matches-section">
+    <h2 class="section-title">Recent matches</h2>
+    @if (matches().length === 0) {
+      <div class="empty-state small">
+        <p>No matches yet.</p>
+      </div>
+    } @else {
+      <div class="match-list">
+        @for (match of matches(); track match.id) {
+          <button
+            type="button"
+            class="match-row"
+            [class.clickable]="match.has_thumb"
+            (click)="openLightbox(match)"
+            [disabled]="!match.has_thumb"
+          >
+            @if (match.has_thumb) {
+              <img class="match-thumb" [src]="thumbnailUrl(match)" [alt]="queryTextFor(match.query_id)" loading="lazy" />
+            } @else {
+              <span class="match-thumb placeholder">
+                <app-icon name="target" [size]="18" />
+              </span>
+            }
+            <div class="match-info">
+              <span class="match-text">{{ queryTextFor(match.query_id) }}</span>
+              <span class="match-meta mono">
+                {{ match.camera }} &middot; {{ formatTime(match.matched_at) }} &middot; score {{ match.score.toFixed(2) }}
+              </span>
+            </div>
+          </button>
+        }
+      </div>
+    }
+  </div>
+</div>
+
+@if (openMatch(); as match) {
+  <app-lightbox [imageUrl]="thumbnailUrl(match)" [alt]="queryTextFor(match.query_id)" (closed)="closeLightbox()">
+    <span class="lightbox-label">{{ queryTextFor(match.query_id) }}</span>
+    <span class="lightbox-dot">&middot;</span>
+    <span>{{ match.camera }}</span>
+    <span class="lightbox-dot">&middot;</span>
+    <span class="mono">{{ formatTime(match.matched_at) }}</span>
+    <span class="lightbox-dot">&middot;</span>
+    <span class="mono">score {{ match.score.toFixed(2) }}</span>
+  </app-lightbox>
+}

@@ -1,0 +1,37 @@
+<div class="tile">
+  <div class="frame">
+    <video
+      #videoEl
+      class="video-el"
+      [class.visible]="mode() === 'mse' || mode() === 'webrtc'"
+      autoplay
+      muted
+      playsinline
+    ></video>
+
+    @if (mode() !== 'mse' && mode() !== 'webrtc') {
+      @if (snapshotUrl(); as url) {
+        <img class="poster" [src]="url" [alt]="camera().name" />
+      } @else if (mode() === 'error') {
+        <div class="frame-placeholder error">
+          <app-icon name="wifiOff" [size]="28" />
+          <span>signal lost</span>
+        </div>
+      } @else {
+        <div class="frame-placeholder">
+          <app-icon name="camera" [size]="28" />
+          <span>connecting…</span>
+        </div>
+      }
+    }
+
+    <div class="live-badge" [class.tier-poster]="mode() !== 'mse' && mode() !== 'webrtc'">
+      <span class="live-dot"></span>
+      <span class="mono">{{ mode() === 'mse' || mode() === 'webrtc' ? 'LIVE' : 'STILL' }}</span>
+    </div>
+  </div>
+  <div class="tile-footer">
+    <span class="camera-name">{{ camera().name }}</span>
+    <span class="camera-meta mono">{{ camera().width }}×{{ camera().height }} · {{ camera().fps }}fps</span>
+  </div>
+</div>

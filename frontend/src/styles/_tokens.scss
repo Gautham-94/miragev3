@@ -1,0 +1,73 @@
+// mirage design tokens — control-room / operational-instrument aesthetic.
+// A dark, cool-neutral ground (never pure black) with a single warm signal-orange
+// accent reserved for interactive/active state, plus a separate semantic palette for
+// severity (never conflated with the accent hue).
+
+:root {
+  // --- Neutrals (cool blue-grey bias, not pure grey) ---
+  --bg-void: #05070a;       // page background, behind everything
+  --bg-base: #0a0d12;       // primary surface (sidebar, cards)
+  --bg-raised: #10141b;     // raised surface (panels, camera tiles)
+  --bg-overlay: #171c25;    // hover/active surface, popovers
+  --border-subtle: #1c222c;
+  --border: #262e3a;
+  --border-strong: #384252;
+
+  --text-primary: #e4e7eb;
+  --text-secondary: #9aa5b1;
+  --text-tertiary: #5c6773;
+  --text-disabled: #3a4149;
+
+  // --- Accent: signal-orange, used sparingly for interactive/focus/active state only ---
+  --accent: #ff6b35;
+  --accent-dim: #c94f22;
+  --accent-wash: rgba(255, 107, 53, 0.12);
+
+  // --- Semantic severity (independent of accent) ---
+  --severity-alert: #ff3b3b;
+  --severity-alert-wash: rgba(255, 59, 59, 0.14);
+  --severity-detection: #ffb020;
+  --severity-detection-wash: rgba(255, 176, 32, 0.14);
+  --severity-info: #3ea6ff;
+  --severity-info-wash: rgba(62, 166, 255, 0.14);
+
+  --status-online: #3ecf6e;
+  --status-online-wash: rgba(62, 207, 110, 0.14);
+  --status-offline: #5c6773;
+  --status-degraded: #ffb020;
+
+  // --- Type scale ---
+  --font-display: "Archivo", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --text-xs: 11px;
+  --text-sm: 12.5px;
+  --text-base: 14px;
+  --text-md: 15.5px;
+  --text-lg: 18px;
+  --text-xl: 22px;
+  --text-2xl: 28px;
+
+  --tracking-wide: 0.06em;
+  --tracking-wider: 0.09em;
+
+  // --- Spacing scale (4px base) ---
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+
+  --shadow-panel: 0 1px 0 rgba(255, 255, 255, 0.02) inset, 0 8px 24px rgba(0, 0, 0, 0.4);
+
+  --sidebar-width: 220px;
+  --topbar-height: 56px;
+}

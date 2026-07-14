@@ -1,0 +1,111 @@
+<div class="page">
+  <div class="page-header">
+    <div>
+      <h1 class="page-title">Cameras</h1>
+      <p class="page-subtitle">{{ cameras().length }} camera{{ cameras().length === 1 ? '' : 's' }} configured</p>
+    </div>
+    <a class="btn-primary" routerLink="/add-camera">
+      <app-icon name="plus" [size]="16" />
+      Add camera
+    </a>
+  </div>
+
+  @if (justDeleted()) {
+    <div class="restart-banner">
+      <app-icon name="checkCircle" [size]="16" />
+      Camera removed. Restart <code>python -m mirage</code> for this to take effect.
+    </div>
+  }
+  @if (justToggled(); as toggled) {
+    <div class="restart-banner">
+      <app-icon name="checkCircle" [size]="16" />
+      {{ toggled.name }} {{ toggled.enabled ? 'started' : 'stopped' }}. Restart <code>python -m mirage</code> for this to take effect.
+    </div>
+  }
+
+  @if (loading()) {
+    <div class="empty-state">
+      <span class="eyebrow">loading</span>
+    </div>
+  } @else if (loadError()) {
+    <div class="empty-state">
+      <app-icon name="wifiOff" [size]="24" />
+      <p>{{ loadError() }}</p>
+    </div>
+  } @else if (cameras().length === 0) {
+    <div class="empty-state">
+      <span class="eyebrow">no cameras configured</span>
+      <p>Add a camera to get started.</p>
+      <a class="btn-primary" routerLink="/add-camera">
+        <app-icon name="plus" [size]="16" />
+        Add camera
+      </a>
+    </div>
+  } @else {
+    <div class="camera-list">
+      @for (camera of cameras(); track camera.name) {
+        <div class="camera-row">
+          <app-icon name="camera" [size]="20" />
+          <div class="camera-info">
+            <span class="camera-name">{{ camera.name }}</span>
+            <span class="camera-meta">
+              {{ camera.detector }} · {{ camera.width }}×{{ camera.height }}@{{ camera.fps }}fps ·
+              {{ camera.rtsp_transport.toUpperCase() }}
+              @if (camera.record_enabled) {
+                · recording
+              }
+              @if (!camera.enabled) {
+                · disabled
+              }
+            </span>
+          </div>
+
+          @if (pendingDelete() === camera.name) {
+            <div class="delete-confirm">
+              <span>Delete {{ camera.name }}?</span>
+              <button type="button" class="text-btn danger" (click)="deleteCamera(camera.name)" [disabled]="deleting()">
+                @if (deleting()) {
+                  <span class="spinner small"></span>
+                } @else {
+                  Confirm
+                }
+              </button>
+              <button type="button" class="text-btn" (click)="cancelDelete()" [disabled]="deleting()">Cancel</button>
+            </div>
+          } @else {
+            <div class="camera-actions">
+              <button
+                type="button"
+                class="icon-btn"
+                (click)="toggleEnabled(camera)"
+                [disabled]="togglingName() === camera.name"
+                [title]="camera.enabled ? 'Stop' : 'Start'"
+              >
+                @if (togglingName() === camera.name) {
+                  <span class="spinner small"></span>
+                } @else if (camera.enabled) {
+                  <app-icon name="pause" [size]="16" />
+                } @else {
+                  <app-icon name="play" [size]="16" />
+                }
+              </button>
+              <button type="button" class="icon-btn" (click)="editCamera(camera.name)" title="Edit">
+                <app-icon name="pencil" [size]="16" />
+              </button>
+              <button type="button" class="icon-btn danger" (click)="confirmDelete(camera.name)" title="Delete">
+                <app-icon name="trash" [size]="16" />
+              </button>
+            </div>
+          }
+        </div>
+      }
+    </div>
+  }
+
+  @if (deleteError()) {
+    <div class="inline-error">{{ deleteError() }}</div>
+  }
+  @if (toggleError()) {
+    <div class="inline-error">{{ toggleError() }}</div>
+  }
+</div>

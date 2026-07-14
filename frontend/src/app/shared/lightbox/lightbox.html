@@ -1,0 +1,12 @@
+<div class="lightbox-backdrop" (click)="close()">
+  <button type="button" class="lightbox-close" (click)="close()" aria-label="Close">
+    <app-icon name="x" [size]="20" />
+  </button>
+
+  <figure class="lightbox-content" (click)="stopPropagation($event)">
+    <img class="lightbox-image" [src]="imageUrl()" [alt]="alt()" />
+    <figcaption class="lightbox-caption">
+      <ng-content />
+    </figcaption>
+  </figure>
+</div>

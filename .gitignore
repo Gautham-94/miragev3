@@ -1,0 +1,43 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Node / Angular
+node_modules/
+frontend/dist/
+frontend/.angular/
+npm-debug.log*
+
+# Media (runtime-generated output)
+media/cache/
+media/clips/
+media/exports/
+media/recordings/
+
+# Runtime data
+config/mirage.db
+
+# Editor / IDE
+.vscode/
+.idea/
+
+# Logs
+*.log

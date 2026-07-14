@@ -1,0 +1,278 @@
+<div class="page">
+  <div class="page-header">
+    <div>
+      <h1 class="page-title">{{ isEditMode ? 'Edit camera' : 'Add camera' }}</h1>
+      <p class="page-subtitle">
+        @if (isEditMode) {
+          Update settings for {{ editingCameraName() }}.
+        } @else {
+          Scan the network for ONVIF cameras, or enter a stream URL directly.
+        }
+      </p>
+    </div>
+  </div>
+
+  <div class="wizard-card">
+
+    @if (step() === 'loading') {
+      <div class="scan-state">
+        <div class="spinner"></div>
+        <span>Loading camera config…</span>
+      </div>
+    }
+
+    @if (loadError()) {
+      <div class="inline-error">{{ loadError() }}</div>
+    }
+
+    <!-- Step: entry choice / scan results -->
+    @if (step() === 'entry' && !isEditMode) {
+      @if (entryMode() === 'choose') {
+        <div class="entry-choices">
+          <button type="button" class="entry-choice" (click)="chooseScan()">
+            <app-icon name="wifi" [size]="28" />
+            <span class="entry-choice-title">Scan network</span>
+            <span class="entry-choice-desc">Find ONVIF-compliant cameras automatically</span>
+          </button>
+          <button type="button" class="entry-choice" (click)="chooseManual()">
+            <app-icon name="keyboard" [size]="28" />
+            <span class="entry-choice-title">Enter RTSP URL</span>
+            <span class="entry-choice-desc">For cameras that aren't ONVIF-compliant</span>
+          </button>
+        </div>
+      } @else if (entryMode() === 'scan') {
+        <div class="scan-panel">
+          <div class="scan-header">
+            <span class="eyebrow">onvif scan</span>
+            <button type="button" class="text-btn" (click)="runScan()" [disabled]="scanning()">
+              <app-icon name="search" [size]="14" />
+              Rescan
+            </button>
+          </div>
+
+          @if (scanning()) {
+            <div class="scan-state">
+              <div class="spinner"></div>
+              <span>Scanning the local network for ONVIF devices…</span>
+            </div>
+          } @else if (scanError()) {
+            <div class="scan-state error">
+              <app-icon name="wifiOff" [size]="24" />
+              <span>{{ scanError() }}</span>
+            </div>
+          } @else if (devices().length === 0) {
+            <div class="scan-state">
+              <app-icon name="wifiOff" [size]="24" />
+              <span>No ONVIF devices found on this network.</span>
+              <button type="button" class="link-btn" (click)="chooseManual()">Enter an RTSP URL manually instead</button>
+            </div>
+          } @else {
+            <div class="device-list">
+              @for (device of devices(); track device.url) {
+                <button type="button" class="device-row" (click)="selectDevice(device)">
+                  <app-icon name="camera" [size]="20" />
+                  <span class="device-info">
+                    <span class="device-name">{{ device.name || 'Unnamed device' }}</span>
+                    @if (device.info) {
+                      <span class="device-meta">{{ device.info }}</span>
+                    }
+                  </span>
+                  <app-icon name="chevronRight" [size]="16" />
+                </button>
+              }
+            </div>
+          }
+
+          <button type="button" class="link-btn back-link" (click)="backToEntry()">
+            <app-icon name="arrowLeft" [size]="14" />
+            Back
+          </button>
+        </div>
+      }
+    }
+
+    <!-- Step: ONVIF credentials -->
+    @if (step() === 'credentials') {
+      <form class="form" (ngSubmit)="resolveStream()">
+        <span class="eyebrow">device credentials</span>
+        <p class="form-hint">
+          {{ selectedDevice()?.name || 'This device' }} needs its ONVIF username and password to look up its video stream.
+        </p>
+
+        <label class="field">
+          <span>Device IP</span>
+          <input type="text" [ngModel]="onvifIp()" (ngModelChange)="onvifIp.set($event)" name="onvifIp" required />
+        </label>
+        <label class="field">
+          <span>Username</span>
+          <input type="text" [ngModel]="onvifUsername()" (ngModelChange)="onvifUsername.set($event)" name="onvifUsername" required autocomplete="off" />
+        </label>
+        <label class="field">
+          <span>Password</span>
+          <input type="password" [ngModel]="onvifPassword()" (ngModelChange)="onvifPassword.set($event)" name="onvifPassword" autocomplete="off" />
+        </label>
+
+        @if (resolveError()) {
+          <div class="inline-error">{{ resolveError() }}</div>
+        }
+
+        <div class="form-actions">
+          <button type="button" class="btn-secondary" (click)="backToDeviceList()">Back</button>
+          <button type="submit" class="btn-primary" [disabled]="resolving() || !onvifIp() || !onvifUsername()">
+            @if (resolving()) {
+              <span class="spinner small"></span> Resolving…
+            } @else {
+              Connect
+            }
+          </button>
+        </div>
+      </form>
+    }
+
+    <!-- Step: camera details (both entry paths converge here) -->
+    @if (step() === 'details') {
+      <form class="form" (ngSubmit)="save()">
+        <span class="eyebrow">camera details</span>
+
+        <label class="field">
+          <span>Name</span>
+          <input type="text" [ngModel]="cameraName()" (ngModelChange)="cameraName.set($event)" name="cameraName" required placeholder="front_door" />
+        </label>
+
+        <label class="field">
+          <span>RTSP URL</span>
+          <input type="text" [ngModel]="resolvedRtspUrl()" (ngModelChange)="resolvedRtspUrl.set($event)" name="rtspUrl" required placeholder="rtsp://user:pass@192.168.1.50:554/stream1" />
+        </label>
+
+        <label class="field">
+          <span>Connection</span>
+          <div class="transport-toggle">
+            <button
+              type="button"
+              class="transport-option"
+              [class.active]="rtspTransport() === 'tcp'"
+              (click)="rtspTransport.set('tcp')"
+            >
+              TCP
+              <span class="transport-hint">Recommended</span>
+            </button>
+            <button
+              type="button"
+              class="transport-option"
+              [class.active]="rtspTransport() === 'udp'"
+              (click)="rtspTransport.set('udp')"
+            >
+              UDP
+              <span class="transport-hint">If TCP keeps disconnecting</span>
+            </button>
+          </div>
+        </label>
+
+        <label class="field">
+          <span>Detector</span>
+          <div class="select-wrap">
+            <select [ngModel]="selectedDetector()" (ngModelChange)="selectedDetector.set($event)" name="detector" required>
+              @for (d of detectors(); track d.name) {
+                <option [value]="d.name">{{ d.name }} ({{ d.model_width }}×{{ d.model_height }})</option>
+              }
+            </select>
+            <app-icon name="chevronDown" [size]="14" />
+          </div>
+        </label>
+
+        <label class="field">
+          <span>Track objects (comma-separated)</span>
+          <input type="text" [ngModel]="trackObjectsInput()" (ngModelChange)="trackObjectsInput.set($event)" name="trackObjects" placeholder="person, car, dog" />
+        </label>
+
+        <label class="checkbox-field">
+          <input
+            type="checkbox"
+            [ngModel]="openvocabDirectFrame()"
+            (ngModelChange)="openvocabDirectFrame.set($event)"
+            name="openvocabDirectFrame"
+          />
+          <span>Check open-vocabulary queries against the whole frame</span>
+        </label>
+        <p class="form-hint">
+          On (queries checked directly against the full motion-triggered frame) for things the detector above was
+          never trained to recognize as an object at all. Off (default) only checks crops of objects the detector
+          already confirmed.
+        </p>
+
+        <div class="field-row">
+          <label class="field">
+            <span>Width</span>
+            <input type="number" [ngModel]="width()" (ngModelChange)="width.set($event)" name="width" min="64" />
+          </label>
+          <label class="field">
+            <span>Height</span>
+            <input type="number" [ngModel]="height()" (ngModelChange)="height.set($event)" name="height" min="64" />
+          </label>
+          <label class="field">
+            <span>FPS</span>
+            <input type="number" [ngModel]="fps()" (ngModelChange)="fps.set($event)" name="fps" min="1" max="30" />
+          </label>
+        </div>
+
+        <label class="checkbox-field">
+          <input type="checkbox" [ngModel]="recordEnabled()" (ngModelChange)="recordEnabled.set($event)" name="recordEnabled" />
+          <span>Record continuously</span>
+        </label>
+
+        @if (recordEnabled()) {
+          <div class="field-row">
+            <label class="field">
+              <span>Retain recordings for (days)</span>
+              <input type="number" [ngModel]="retainDays()" (ngModelChange)="retainDays.set($event)" name="retainDays" min="0" />
+            </label>
+            <label class="field">
+              <span>Segment length (seconds)</span>
+              <input type="number" [ngModel]="segmentSeconds()" (ngModelChange)="segmentSeconds.set($event)" name="segmentSeconds" min="1" max="60" />
+            </label>
+          </div>
+        }
+
+        @if (saveError()) {
+          <div class="inline-error">{{ saveError() }}</div>
+        }
+
+        <div class="form-actions">
+          @if (isEditMode) {
+            <button type="button" class="btn-secondary" (click)="goToManageCameras()">Cancel</button>
+          } @else {
+            <button type="button" class="btn-secondary" (click)="backToEntry()">Back</button>
+          }
+          <button type="submit" class="btn-primary" [disabled]="saving() || !canSubmitDetails()">
+            @if (saving()) {
+              <span class="spinner small"></span> Saving…
+            } @else {
+              {{ isEditMode ? 'Save changes' : 'Save camera' }}
+            }
+          </button>
+        </div>
+      </form>
+    }
+
+    <!-- Step: done -->
+    @if (step() === 'done') {
+      <div class="done-panel">
+        <app-icon name="checkCircle" [size]="40" />
+        <h2>{{ savedCameraName() }} saved</h2>
+        <p class="restart-note">
+          Restart <code>python -m mirage</code> to
+          {{ isEditMode ? 'apply these changes' : 'start capturing this camera' }} — config
+          changes don't take effect in an already-running pipeline yet.
+        </p>
+        <div class="form-actions centered">
+          @if (isEditMode) {
+            <button type="button" class="btn-primary" (click)="goToManageCameras()">Back to cameras</button>
+          } @else {
+            <button type="button" class="btn-secondary" (click)="addAnother()">Add another</button>
+            <button type="button" class="btn-primary" (click)="goToLive()">Go to Live</button>
+          }
+        </div>
+      </div>
+    }
+  </div>
+</div>

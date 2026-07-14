@@ -1,0 +1,36 @@
+# Sample mirage config. Point `path` at a real RTSP camera to try it for real, e.g.:
+#   path: rtsp://user:pass@192.168.1.50:554/stream1
+#
+# As shipped, this points at a local synthetic test stream (see README section below /
+# the command in scripts/run_test_stream.sh) so you can try the whole system without
+# owning a camera yet.
+
+detectors:
+  general:
+    name: general
+    device: onnx_yolov8
+    model:
+      width: 320
+      height: 320
+      input_dtype: int
+      pixel_format: rgb
+      model_path: models/yolov8n.onnx
+      labelmap_path: models/coco_labelmap.txt
+
+cameras:
+  test_cam:
+    name: test_cam
+    detector: general
+    ffmpeg:
+      inputs:
+        - path: tcp://127.0.0.1:19500
+    detect:
+      width: 640
+      height: 480
+      fps: 10
+    record:
+      enabled: true
+      continuous:
+        days: 1
+    objects:
+      track: [person, car, bus, dog, cat]

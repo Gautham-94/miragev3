@@ -1,0 +1,167 @@
+<div class="page">
+  <div class="page-header">
+    <div>
+      <h1 class="page-title">Detectors</h1>
+      <p class="page-subtitle">{{ detectors().length }} detector{{ detectors().length === 1 ? '' : 's' }} configured</p>
+    </div>
+    @if (!showAddForm()) {
+      <button type="button" class="btn-primary" (click)="openAddForm()">
+        <app-icon name="plus" [size]="16" />
+        Add detector
+      </button>
+    }
+  </div>
+
+  @if (justDeleted()) {
+    <div class="restart-banner">
+      <app-icon name="checkCircle" [size]="16" />
+      Detector removed. Restart <code>python -m mirage</code> for this to take effect.
+    </div>
+  }
+  @if (justAdded()) {
+    <div class="restart-banner">
+      <app-icon name="checkCircle" [size]="16" />
+      @if (editingDetectorName()) {
+        Detector updated. Restart <code>python -m mirage</code> for this to take effect.
+      } @else {
+        Detector added. Route a camera to it (Cameras &rarr; edit), then restart <code>python -m mirage</code> for this to take effect.
+      }
+    </div>
+  }
+
+  @if (showAddForm()) {
+    <div class="add-form">
+      <div class="field">
+        <span>Name</span>
+        <input
+          type="text"
+          [ngModel]="name()"
+          (ngModelChange)="name.set($event)"
+          placeholder="e.g. wildlife_detector"
+          [disabled]="!!editingDetectorName()"
+        />
+      </div>
+      <div class="field">
+        <span>Model path (.onnx)</span>
+        <input
+          type="text"
+          class="mono"
+          [ngModel]="modelPath()"
+          (ngModelChange)="modelPath.set($event)"
+          placeholder="models/wildlife_yolov8.onnx"
+        />
+      </div>
+      <div class="field">
+        <span>Labelmap path</span>
+        <input
+          type="text"
+          class="mono"
+          [ngModel]="labelmapPath()"
+          (ngModelChange)="labelmapPath.set($event)"
+          placeholder="models/wildlife_labelmap.txt"
+        />
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <span>Input width</span>
+          <input type="number" [ngModel]="width()" (ngModelChange)="width.set($event)" min="1" />
+        </div>
+        <div class="field">
+          <span>Input height</span>
+          <input type="number" [ngModel]="height()" (ngModelChange)="height.set($event)" min="1" />
+        </div>
+      </div>
+      <div class="field">
+        <span>Acceleration</span>
+        <div class="select-wrap">
+          <select [ngModel]="executionProvider()" (ngModelChange)="executionProvider.set($event)" name="executionProvider">
+            @for (provider of availableProviders(); track provider) {
+              <option [value]="provider">{{ providerLabel(provider) }}</option>
+            }
+          </select>
+          <app-icon name="chevronDown" [size]="14" />
+        </div>
+      </div>
+      <p class="hint">
+        The model file must already exist on disk at this path (relative paths resolve from wherever
+        <code>python -m mirage</code> runs). Currently only YOLOv8-architecture ONNX models are supported.
+        Acceleration options are limited to what's actually available on this machine.
+      </p>
+
+      @if (saveError()) {
+        <div class="inline-error">{{ saveError() }}</div>
+      }
+
+      <div class="form-actions">
+        <button type="button" class="text-btn" (click)="cancelAddForm()" [disabled]="saving()">Cancel</button>
+        <button type="button" class="btn-primary" (click)="save()" [disabled]="!canSubmit() || saving()">
+          @if (saving()) {
+            <span class="spinner small"></span>
+          } @else if (editingDetectorName()) {
+            Save changes
+          } @else {
+            Add detector
+          }
+        </button>
+      </div>
+    </div>
+  }
+
+  @if (loading()) {
+    <div class="empty-state">
+      <span class="eyebrow">loading</span>
+    </div>
+  } @else if (loadError()) {
+    <div class="empty-state">
+      <app-icon name="wifiOff" [size]="24" />
+      <p>{{ loadError() }}</p>
+    </div>
+  } @else if (detectors().length === 0) {
+    <div class="empty-state">
+      <span class="eyebrow">no detectors configured</span>
+      <p>Add a detector to get started.</p>
+    </div>
+  } @else {
+    <div class="detector-list">
+      @for (detector of detectors(); track detector.name) {
+        <div class="detector-row">
+          <app-icon name="cpu" [size]="20" />
+          <div class="detector-info">
+            <span class="detector-name">{{ detector.name }}</span>
+            <span class="detector-meta mono">
+              {{ detector.device }} · {{ detector.model_width }}&times;{{ detector.model_height }} ·
+              {{ providerLabel(detector.execution_provider) }}
+            </span>
+          </div>
+
+          @if (pendingDelete() === detector.name) {
+            <div class="delete-confirm">
+              <span>Delete {{ detector.name }}?</span>
+              <button type="button" class="text-btn danger" (click)="deleteDetector(detector.name)" [disabled]="deleting()">
+                @if (deleting()) {
+                  <span class="spinner small"></span>
+                } @else {
+                  Confirm
+                }
+              </button>
+              <button type="button" class="text-btn" (click)="cancelDelete()" [disabled]="deleting()">Cancel</button>
+            </div>
+          } @else {
+            <div class="detector-actions">
+              <button type="button" class="icon-btn" (click)="editDetector(detector)" title="Edit">
+                <app-icon name="pencil" [size]="16" />
+              </button>
+              <button type="button" class="icon-btn danger" (click)="confirmDelete(detector.name)" title="Delete">
+                <app-icon name="trash" [size]="16" />
+              </button>
+            </div>
+          }
+        </div>
+      }
+    </div>
+  }
+
+  @if (deleteError()) {
+    <div class="inline-error">{{ deleteError() }}</div>
+  }
+</div>

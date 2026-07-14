@@ -1,0 +1,38 @@
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-mark">◆</span>
+      <span class="brand-name">mirage</span>
+    </div>
+
+    <nav class="nav">
+      @for (item of navItems; track item.path) {
+        <a
+          class="nav-item"
+          [routerLink]="item.path"
+          routerLinkActive="active"
+        >
+          <app-icon [name]="item.icon" [size]="17" />
+          <span>{{ item.label }}</span>
+        </a>
+      }
+    </nav>
+
+    <a class="add-camera-btn" routerLink="/add-camera" routerLinkActive="active">
+      <app-icon name="plus" [size]="16" />
+      <span>Add camera</span>
+    </a>
+
+    <div class="sidebar-footer">
+      <span class="eyebrow">system</span>
+      <div class="status-line">
+        <span class="status-dot"></span>
+        <span class="mono">operational</span>
+      </div>
+    </div>
+  </aside>
+
+  <div class="main">
+    <router-outlet />
+  </div>
+</div>

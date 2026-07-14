@@ -1,0 +1,93 @@
+<div class="page">
+  <div class="page-header">
+    <div>
+      <h1 class="page-title">Recordings</h1>
+      <p class="page-subtitle">Permanently stored segments, most recent first.</p>
+    </div>
+    <div class="filter-bar">
+      <app-filter-select label="Camera" [options]="cameraOptions()" [(value)]="cameraFilter" />
+    </div>
+  </div>
+
+  @if (!loading() && groupedRecordings().length === 0) {
+    <div class="empty-state">
+      <span class="eyebrow">no recordings yet</span>
+      <p>Recorded segments will appear here once the recording pipeline has run.</p>
+    </div>
+  } @else {
+    @for (group of groupedRecordings(); track group.dateLabel) {
+      <div class="date-group">
+        <div class="date-heading">
+          <span class="date-line"></span>
+          <span class="mono">{{ group.dateLabel }}</span>
+          <span class="date-line"></span>
+        </div>
+        <div class="recordings-grid">
+          @for (recording of group.recordings; track recording.id) {
+            <div
+              class="recording-card"
+              (mouseenter)="onHover(recording.id)"
+              (mouseleave)="onHover(null)"
+            >
+              <button type="button" class="recording-thumb" (click)="openLightbox(recording)">
+                <video
+                  class="poster-video"
+                  [src]="clipUrl(recording.id)"
+                  preload="metadata"
+                  muted
+                  playsinline
+                  (loadedmetadata)="showPosterFrame($event)"
+                ></video>
+                @if (hoveredId() === recording.id) {
+                  <video
+                    class="preview-video"
+                    [src]="clipUrl(recording.id)"
+                    autoplay
+                    muted
+                    loop
+                    playsinline
+                  ></video>
+                }
+                <span class="play-badge">
+                  <app-icon name="play" [size]="20" />
+                </span>
+              </button>
+              <a
+                class="download-btn"
+                [href]="clipUrl(recording.id)"
+                [download]="downloadName(recording)"
+                (click)="$event.stopPropagation()"
+                aria-label="Download"
+                title="Download"
+              >
+                <app-icon name="download" [size]="16" />
+              </a>
+              <div class="recording-meta">
+                <span class="camera-name">{{ recording.camera }}</span>
+                <span class="mono timestamp">{{ formatTime(recording.start_time) }}</span>
+                <span class="mono stats">{{ recording.duration.toFixed(0) }}s · {{ recording.segment_size_mb.toFixed(1) }} MB</span>
+              </div>
+            </div>
+          }
+        </div>
+      </div>
+    }
+  }
+</div>
+
+@if (openRecording(); as recording) {
+  <app-video-lightbox
+    [videoUrl]="clipUrl(recording.id)"
+    [downloadUrl]="clipUrl(recording.id)"
+    [downloadName]="downloadName(recording)"
+    (closed)="closeLightbox()"
+  >
+    <span class="lightbox-camera">{{ recording.camera }}</span>
+    <span class="lightbox-dot">·</span>
+    <span>{{ formatTime(recording.start_time) }}</span>
+    <span class="lightbox-dot">·</span>
+    <span class="mono">{{ recording.duration.toFixed(0) }}s</span>
+    <span class="lightbox-dot">·</span>
+    <span class="mono">{{ recording.segment_size_mb.toFixed(1) }} MB</span>
+  </app-video-lightbox>
+}

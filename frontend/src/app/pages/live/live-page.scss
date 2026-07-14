@@ -1,0 +1,7 @@
+@use '../_page-shell';
+
+.camera-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: var(--space-5);
+}

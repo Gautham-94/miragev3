@@ -1,0 +1,11 @@
+<label class="filter-select">
+  <span class="filter-label">{{ label() }}</span>
+  <span class="select-wrap">
+    <select [value]="value()" (change)="onChange($event)">
+      @for (option of options(); track option.value) {
+        <option [value]="option.value">{{ option.label }}</option>
+      }
+    </select>
+    <app-icon name="chevronDown" [size]="14" />
+  </span>
+</label>

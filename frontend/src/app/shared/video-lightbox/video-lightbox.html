@@ -1,0 +1,24 @@
+<div class="lightbox-backdrop" (click)="close()">
+  <div class="lightbox-actions">
+    <a
+      class="lightbox-action"
+      [href]="downloadUrl()"
+      [download]="downloadName()"
+      (click)="stopPropagation($event)"
+      aria-label="Download"
+      title="Download"
+    >
+      <app-icon name="download" [size]="18" />
+    </a>
+    <button type="button" class="lightbox-action" (click)="close()" aria-label="Close">
+      <app-icon name="x" [size]="20" />
+    </button>
+  </div>
+
+  <figure class="lightbox-content" (click)="stopPropagation($event)">
+    <video #videoEl class="lightbox-video" [src]="videoUrl()" controls playsinline (error)="onError()"></video>
+    <figcaption class="lightbox-caption">
+      <ng-content />
+    </figcaption>
+  </figure>
+</div>

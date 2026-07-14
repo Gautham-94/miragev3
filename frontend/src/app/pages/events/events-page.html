@@ -1,0 +1,59 @@
+<div class="page">
+  <div class="page-header">
+    <div>
+      <h1 class="page-title">Events</h1>
+      <p class="page-subtitle">Tracked-object detections, most recent first.</p>
+    </div>
+    <div class="filter-bar">
+      <app-filter-select label="Camera" [options]="cameraOptions()" [(value)]="cameraFilter" />
+      <app-filter-select label="Label" [options]="labelOptions()" [(value)]="labelFilter" />
+      <app-filter-select label="Range" [options]="timeRangeOptions" [(value)]="timeRangeFilter" />
+    </div>
+  </div>
+
+  @if (!loading() && filteredEvents().length === 0) {
+    <div class="empty-state">
+      <span class="eyebrow">no events yet</span>
+      <p>Tracked objects will appear here once detection is running.</p>
+    </div>
+  } @else {
+    <div class="events-grid">
+      @for (event of filteredEvents(); track event.id) {
+        <button
+          type="button"
+          class="event-card"
+          [class.clickable]="event.has_snapshot"
+          (click)="openLightbox(event)"
+        >
+          <div class="event-thumb">
+            @if (event.has_snapshot) {
+              <img [src]="snapshotUrl(event)" [alt]="event.label" loading="lazy" />
+            } @else {
+              <div class="thumb-placeholder">
+                <app-icon name="imageOff" [size]="20" />
+              </div>
+            }
+            <span class="event-score mono">{{ (event.top_score * 100).toFixed(0) }}%</span>
+          </div>
+          <div class="event-meta">
+            <span class="event-label">{{ event.label }}</span>
+            <span class="event-camera">{{ event.camera }}</span>
+            <span class="event-time mono">{{ formatTime(event.start_time) }}</span>
+          </div>
+        </button>
+      }
+    </div>
+  }
+</div>
+
+@if (openEvent(); as event) {
+  <app-lightbox [imageUrl]="snapshotUrl(event)" [alt]="event.label" (closed)="closeLightbox()">
+    <span class="lightbox-label">{{ event.label }}</span>
+    <span class="lightbox-dot">·</span>
+    <span>{{ event.camera }}</span>
+    <span class="lightbox-dot">·</span>
+    <span class="mono">{{ (event.top_score * 100).toFixed(0) }}%</span>
+    <span class="lightbox-dot">·</span>
+    <span class="mono">{{ formatTime(event.start_time) }}</span>
+  </app-lightbox>
+}

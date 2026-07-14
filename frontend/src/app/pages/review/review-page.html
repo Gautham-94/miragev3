@@ -1,0 +1,113 @@
+<div class="page">
+  <div class="page-header">
+    <div>
+      <h1 class="page-title">Review</h1>
+      <p class="page-subtitle">Alerts and detections across all cameras.</p>
+    </div>
+    <div class="filter-bar">
+      <app-filter-select label="Camera" [options]="cameraOptions()" [(value)]="cameraFilter" />
+      <app-filter-select label="Severity" [options]="severityOptions" [(value)]="severityFilter" />
+    </div>
+  </div>
+
+  @if (!loading() && filteredSegments().length === 0) {
+    <div class="empty-state">
+      <span class="eyebrow">nothing to review</span>
+      <p>Review segments will appear here once activity is detected.</p>
+    </div>
+  } @else {
+    <div class="review-grid">
+      @for (segment of filteredSegments(); track segment.id) {
+        <button type="button" class="review-card" (click)="select(segment)">
+          <div class="thumb">
+            @if (segment.thumb_path) {
+              <img [src]="thumbnailUrl(segment)" [alt]="segment.camera" />
+            } @else {
+              <div class="thumb-placeholder">
+                <app-icon name="imageOff" [size]="22" />
+              </div>
+            }
+            <span class="severity-chip" [class.severity-alert]="segment.severity === 'alert'">
+              {{ segment.severity }}
+            </span>
+          </div>
+          <div class="card-body">
+            <span class="camera-name">{{ segment.camera }}</span>
+            <span class="mono timestamp">{{ formatTime(segment.start_time) }}</span>
+            @if (objectsFor(segment).length > 0) {
+              <span class="objects">{{ objectsFor(segment).join(', ') }}</span>
+            }
+          </div>
+        </button>
+      }
+    </div>
+  }
+
+  @if (selected(); as segment) {
+    <div class="detail-overlay" (click)="closeDetail()">
+      <div class="detail-panel" (click)="$event.stopPropagation()">
+        <button type="button" class="close-btn" (click)="closeDetail()">
+          <app-icon name="x" [size]="18" />
+        </button>
+        <div class="detail-thumb">
+          @if (segment.thumb_path) {
+            <img [src]="thumbnailUrl(segment)" [alt]="segment.camera" />
+          } @else {
+            <div class="thumb-placeholder large">
+              <app-icon name="imageOff" [size]="32" />
+            </div>
+          }
+        </div>
+        <div class="detail-body">
+          <span class="severity-chip" [class.severity-alert]="segment.severity === 'alert'">
+            {{ segment.severity }}
+          </span>
+          <h2 class="detail-camera">{{ segment.camera }}</h2>
+          <dl class="detail-meta">
+            <dt>Started</dt>
+            <dd class="mono">{{ formatTime(segment.start_time) }}</dd>
+            <dt>Duration</dt>
+            <dd class="mono">{{ formatDuration(segment) }}</dd>
+          </dl>
+          @if (objectsFor(segment).length > 0) {
+            <div class="detail-objects">
+              <span class="eyebrow">contributing objects</span>
+              <div class="object-chips">
+                @for (obj of objectsFor(segment); track obj) {
+                  <span class="object-chip">{{ obj }}</span>
+                }
+              </div>
+            </div>
+          }
+          @if (segment.end_time !== null) {
+            <button type="button" class="play-clip-btn" (click)="playClip(segment)">
+              <app-icon name="play" [size]="16" />
+              Play video
+            </button>
+          } @else {
+            <p class="hint">Video will be available once this alert finishes recording.</p>
+          }
+          @if (clipError()) {
+            <div class="inline-error">{{ clipError() }}</div>
+          }
+        </div>
+      </div>
+    </div>
+  }
+
+  @if (playingClip(); as segment) {
+    <app-video-lightbox
+      [videoUrl]="clipUrl(segment)"
+      [downloadUrl]="clipUrl(segment)"
+      [downloadName]="clipDownloadName(segment)"
+      (closed)="closeClip()"
+      (videoError)="onClipError()"
+    >
+      <span class="lightbox-camera">{{ segment.camera }}</span>
+      <span class="lightbox-dot">&middot;</span>
+      <span>{{ formatTime(segment.start_time) }}</span>
+      <span class="lightbox-dot">&middot;</span>
+      <span class="mono">{{ formatDuration(segment) }}</span>
+    </app-video-lightbox>
+  }
+</div>

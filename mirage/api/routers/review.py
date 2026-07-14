@@ -1,0 +1,94 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import FileResponse
+
+from mirage.api.schemas import ReviewSegmentOut
+from mirage.db.models import ReviewSegment
+from mirage.recording.stitch import recordings_overlapping, stitch_recordings
+from mirage.util.time import utc_from_timestamp
+
+router = APIRouter(prefix="/api/review", tags=["review"])
+
+
+@router.get("", response_model=list[ReviewSegmentOut])
+def list_review_segments(
+    camera: str | None = None,
+    severity: str | None = Query(None, description="'alert' or 'detection'"),
+    after: float | None = Query(None, description="epoch seconds, inclusive lower bound on start_time"),
+    before: float | None = Query(None, description="epoch seconds, exclusive upper bound on start_time"),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+) -> list[ReviewSegmentOut]:
+    query = ReviewSegment.select()
+    if camera is not None:
+        query = query.where(ReviewSegment.camera == camera)
+    if severity is not None:
+        query = query.where(ReviewSegment.severity == severity)
+    if after is not None:
+        query = query.where(ReviewSegment.start_time >= utc_from_timestamp(after))
+    if before is not None:
+        query = query.where(ReviewSegment.start_time < utc_from_timestamp(before))
+
+    query = query.order_by(ReviewSegment.start_time.desc()).limit(limit).offset(offset)
+    return [ReviewSegmentOut.from_model(s) for s in query]
+
+
+@router.get("/{segment_id}", response_model=ReviewSegmentOut)
+def get_review_segment(segment_id: str) -> ReviewSegmentOut:
+    seg = ReviewSegment.get_or_none(ReviewSegment.id == segment_id)
+    if seg is None:
+        raise HTTPException(status_code=404, detail=f"unknown review segment {segment_id!r}")
+    return ReviewSegmentOut.from_model(seg)
+
+
+@router.get("/{segment_id}/thumbnail")
+def get_review_thumbnail(segment_id: str) -> FileResponse:
+    seg = ReviewSegment.get_or_none(ReviewSegment.id == segment_id)
+    if seg is None:
+        raise HTTPException(status_code=404, detail=f"unknown review segment {segment_id!r}")
+    if not seg.thumb_path:
+        raise HTTPException(status_code=404, detail="this review segment has no thumbnail")
+    path = Path(seg.thumb_path)
+    if not path.exists():
+        raise HTTPException(status_code=410, detail=f"thumbnail file no longer exists on disk: {seg.thumb_path}")
+    return FileResponse(path, media_type="image/jpeg")
+
+
+@router.get("/{segment_id}/clip")
+def get_review_segment_clip(segment_id: str, request: Request) -> FileResponse:
+    """Stitches together every permanent recording clip overlapping this review
+    segment's [start_time, end_time] window into one continuous video ("the footage
+    that led to this alert") -- a review segment's own duration almost always spans
+    multiple separate fixed-length recording files, never exactly one (see
+    mirage/recording/stitch.py's module docstring). Cached under
+    request.app.state.export_dir (defaults to the real EXPORT_DIR, injectable per-app
+    for tests -- see create_app) keyed by segment id -- a segment's time window and its
+    underlying recordings are immutable once the segment has ended, so a second request
+    for the same segment reuses the already-stitched file rather than re-running ffmpeg.
+    """
+    seg = ReviewSegment.get_or_none(ReviewSegment.id == segment_id)
+    if seg is None:
+        raise HTTPException(status_code=404, detail=f"unknown review segment {segment_id!r}")
+    if seg.end_time is None:
+        raise HTTPException(status_code=409, detail="this review segment hasn't ended yet")
+
+    dest_path = Path(request.app.state.export_dir) / "review_clips" / f"{segment_id}.mp4"
+    if dest_path.exists():
+        return FileResponse(dest_path, media_type="video/mp4", filename=dest_path.name)
+
+    recordings = recordings_overlapping(seg.camera, seg.start_time, seg.end_time)
+    if not recordings:
+        raise HTTPException(
+            status_code=404,
+            detail="no recordings cover this review segment's time window (may have been deleted by retention)",
+        )
+
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    ok = stitch_recordings(recordings, dest_path)
+    if not ok:
+        raise HTTPException(status_code=500, detail="failed to stitch recordings for this review segment")
+
+    return FileResponse(dest_path, media_type="video/mp4", filename=dest_path.name)
