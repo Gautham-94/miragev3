@@ -26,6 +26,7 @@ class CameraOut(BaseModel):
     detector: str
     record_enabled: bool
     track_objects: list[str]
+    track_all: bool = False
 
 
 class EventOut(BaseModel):

@@ -3,8 +3,10 @@
     <div>
       <h1 class="page-title">Queries</h1>
       <p class="page-subtitle">
-        {{ queries().length }} quer{{ queries().length === 1 ? 'y' : 'ies' }} saved -- matched against
-        confirmed tracked objects via open-vocabulary detection
+        {{ queries().length }} quer{{ queries().length === 1 ? 'y' : 'ies' }} saved. Use this page for
+        compositional descriptions a single Track objects word can't express (e.g. "person carrying a red
+        backpack") -- a plain word like "animals" can be typed directly into a camera's Track objects field
+        instead, and shows up here automatically.
       </p>
     </div>
     @if (!showAddForm()) {
@@ -107,7 +109,14 @@
         <div class="query-row">
           <app-icon name="search" [size]="20" />
           <div class="query-info">
-            <span class="query-text">{{ query.text }}</span>
+            <span class="query-text">
+              {{ query.text }}
+              @if (query.source === 'track_objects') {
+                <span class="source-tag" [title]="'Auto-added from ' + ownerCameraOf(query) + '\'s Track objects field'">
+                  from Track objects
+                </span>
+              }
+            </span>
             <span class="query-meta">
               {{ query.cameras.length === 0 ? 'all cameras' : query.cameras.join(', ') }}
               @if (!query.enabled) {
@@ -116,7 +125,11 @@
             </span>
           </div>
 
-          @if (pendingDelete() === query.id) {
+          @if (query.source === 'track_objects') {
+            <span class="hint auto-hint">
+              Edit on the <a routerLink="/add-camera" [queryParams]="{ camera: ownerCameraOf(query) }">{{ ownerCameraOf(query) }} camera</a> page
+            </span>
+          } @else if (pendingDelete() === query.id) {
             <div class="delete-confirm">
               <span>Delete this query?</span>
               <button type="button" class="text-btn danger" (click)="deleteQuery(query.id)" [disabled]="deleting()">

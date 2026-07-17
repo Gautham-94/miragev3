@@ -12,8 +12,19 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from mirage.api.routers import cameras, config as config_router, events, live, onvif, query_matches, recordings, review
+from mirage.api.routers import (
+    cameras,
+    config as config_router,
+    events,
+    live,
+    onvif,
+    query_matches,
+    recordings,
+    review,
+    system,
+)
 from mirage.config.schema import MirageConfig
+from mirage.const import CACHE_DIR as DEFAULT_CACHE_DIR
 from mirage.const import EXPORT_DIR as DEFAULT_EXPORT_DIR
 from mirage.db.database import close_database, init_database
 from mirage.go2rtc.config import DEFAULT_API_PORT
@@ -25,6 +36,7 @@ def create_app(
     cors_origins: list[str] | None = None,
     go2rtc_api_port: int = DEFAULT_API_PORT,
     export_dir: str = DEFAULT_EXPORT_DIR,
+    cache_dir: str = DEFAULT_CACHE_DIR,
 ) -> FastAPI:
     """`config`, if given, is used as a FIXED override for the lifetime of this app --
     only ever passed by tests that construct a MirageConfig directly without a real DB.
@@ -44,6 +56,7 @@ def create_app(
         app.state.database = init_database(db_path) if db_path else None
         app.state.go2rtc_api_port = go2rtc_api_port
         app.state.export_dir = export_dir
+        app.state.cache_dir = cache_dir
         if config is not None:
             app.state.get_config = lambda: config
         else:
@@ -69,6 +82,7 @@ def create_app(
     app.include_router(recordings.router)
     app.include_router(review.router)
     app.include_router(live.router)
+    app.include_router(system.router)
 
     @app.get("/api/health")
     def health() -> dict:

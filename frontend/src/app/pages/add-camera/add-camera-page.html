@@ -182,8 +182,25 @@
 
         <label class="field">
           <span>Track objects (comma-separated)</span>
-          <input type="text" [ngModel]="trackObjectsInput()" (ngModelChange)="trackObjectsInput.set($event)" name="trackObjects" placeholder="person, car, dog" />
+          <input
+            type="text"
+            [ngModel]="trackObjectsInput()"
+            (ngModelChange)="trackObjectsInput.set($event)"
+            name="trackObjects"
+            placeholder="person, car, dog"
+            [disabled]="trackAll()"
+          />
         </label>
+
+        <label class="checkbox-field">
+          <input type="checkbox" [ngModel]="trackAll()" (ngModelChange)="trackAll.set($event)" name="trackAll" />
+          <span>Track every object this detector knows, not just the ones listed above</span>
+        </label>
+        <p class="form-hint">
+          On: every label the routed detector can recognize (e.g. all 80 COCO classes) is tracked and shows up in
+          Events/Recordings for this camera, regardless of what's typed in Track objects above. Off (default): only
+          the listed labels are tracked.
+        </p>
 
         <label class="checkbox-field">
           <input
@@ -260,10 +277,21 @@
         <app-icon name="checkCircle" [size]="40" />
         <h2>{{ savedCameraName() }} saved</h2>
         <p class="restart-note">
-          Restart <code>python -m mirage</code> to
-          {{ isEditMode ? 'apply these changes' : 'start capturing this camera' }} — config
-          changes don't take effect in an already-running pipeline yet.
+          {{ isEditMode ? 'These changes' : 'This camera' }} won't take effect until you
+          apply pending changes — use the "Apply changes" button to restart the pipeline.
         </p>
+        @if (savedOpenVocabTerms().length > 0) {
+          <p class="open-vocab-note">
+            <app-icon name="wifi" [size]="14" />
+            @if (savedOpenVocabTerms().length === 1) {
+              "{{ savedOpenVocabTerms()[0] }}" isn't in this camera's detector's vocabulary —
+            } @else {
+              {{ savedOpenVocabTerms().join(', ') }} aren't in this camera's detector's vocabulary —
+            }
+            checking {{ savedOpenVocabTerms().length === 1 ? 'it' : 'them' }} via open-vocabulary search
+            against the whole frame instead. See the Queries page to review or add more.
+          </p>
+        }
         <div class="form-actions centered">
           @if (isEditMode) {
             <button type="button" class="btn-primary" (click)="goToManageCameras()">Back to cameras</button>

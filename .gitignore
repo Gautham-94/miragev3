@@ -34,6 +34,11 @@ media/recordings/
 
 # Runtime data
 config/mirage.db
+config/mirage.db-shm
+config/mirage.db-wal
+mirage.db
+mirage.db-shm
+mirage.db-wal
 
 # Editor / IDE
 .vscode/

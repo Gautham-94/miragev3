@@ -54,6 +54,11 @@ export class AddCameraPage implements OnInit {
   protected readonly cameraName = signal('');
   protected readonly selectedDetector = signal('');
   protected readonly trackObjectsInput = signal('person');
+  // When true, this camera tracks EVERY label its routed detector knows (e.g. all 80
+  // COCO classes) -- Track objects above is still saved but ignored by the tracking
+  // gate while this is on (see ObjectsConfig.track_all's docstring), so re-disabling
+  // it restores whatever was typed there without the user needing to retype it.
+  protected readonly trackAll = signal(false);
   protected readonly width = signal(640);
   protected readonly height = signal(480);
   protected readonly fps = signal(5);
@@ -77,6 +82,12 @@ export class AddCameraPage implements OnInit {
   protected readonly saving = signal(false);
   protected readonly saveError = signal<string | null>(null);
   protected readonly savedCameraName = signal<string | null>(null);
+  // Which Track objects words the backend routed to open-vocabulary search instead of
+  // this camera's closed-vocab detector (see ConfigMutationResponse.open_vocab_terms) --
+  // only known after a save round-trip, shown on the "done" step so the user isn't left
+  // wondering whether "animals" silently did nothing (TODO_FIX_LIST.md item 4's original
+  // gap: a non-COCO track word used to be a dead config value with zero feedback).
+  protected readonly savedOpenVocabTerms = signal<string[]>([]);
 
   protected readonly canSubmitDetails = computed(() => {
     return (
@@ -111,6 +122,7 @@ export class AddCameraPage implements OnInit {
           this.resolvedRtspUrl.set(cam.rtsp_url);
           this.selectedDetector.set(cam.detector);
           this.trackObjectsInput.set(cam.track_objects.join(', '));
+          this.trackAll.set(cam.track_all);
           this.width.set(cam.width);
           this.height.set(cam.height);
           this.fps.set(cam.fps);
@@ -237,6 +249,7 @@ export class AddCameraPage implements OnInit {
       rtsp_url: this.resolvedRtspUrl().trim(),
       detector: this.selectedDetector(),
       track_objects: trackObjects.length > 0 ? trackObjects : ['person'],
+      track_all: this.trackAll(),
       width: this.width(),
       height: this.height(),
       fps: this.fps(),
@@ -255,6 +268,7 @@ export class AddCameraPage implements OnInit {
       next: (resp) => {
         this.saving.set(false);
         this.savedCameraName.set(resp.camera.name);
+        this.savedOpenVocabTerms.set(resp.open_vocab_terms);
         this.step.set('done');
       },
       error: (err) => {
@@ -284,9 +298,11 @@ export class AddCameraPage implements OnInit {
     this.resolvedRtspUrl.set('');
     this.cameraName.set('');
     this.trackObjectsInput.set('person');
+    this.trackAll.set(false);
     this.rtspTransport.set('tcp');
     this.segmentSeconds.set(10);
     this.openvocabDirectFrame.set(false);
     this.savedCameraName.set(null);
+    this.savedOpenVocabTerms.set([]);
   }
 }

@@ -25,10 +25,43 @@
 
     <div class="sidebar-footer">
       <span class="eyebrow">system</span>
-      <div class="status-line">
-        <span class="status-dot"></span>
-        <span class="mono">operational</span>
-      </div>
+
+      @if (isRestarting()) {
+        <div class="status-line restarting">
+          <span class="spinner"></span>
+          <span class="mono">restarting…</span>
+        </div>
+      } @else if (showReadyBanner()) {
+        <div class="status-line ready">
+          <app-icon name="checkCircle" [size]="14" />
+          <span class="mono">system ready</span>
+        </div>
+      } @else if (isCrashed()) {
+        <div class="status-line crashed">
+          <span class="status-dot crashed"></span>
+          <span class="mono">pipeline crashed</span>
+        </div>
+      } @else {
+        <div class="status-line">
+          <span class="status-dot"></span>
+          <span class="mono">operational</span>
+        </div>
+      }
+
+      <button
+        type="button"
+        class="apply-changes-btn"
+        [disabled]="isRestarting()"
+        (click)="applyChanges()"
+      >
+        @if (isRestarting()) {
+          <span class="spinner small"></span>
+          <span>Restarting…</span>
+        } @else {
+          <app-icon name="clock" [size]="14" />
+          <span>Apply changes</span>
+        }
+      </button>
     </div>
   </aside>
 

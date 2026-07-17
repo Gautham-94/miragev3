@@ -13,13 +13,13 @@
   @if (justDeleted()) {
     <div class="restart-banner">
       <app-icon name="checkCircle" [size]="16" />
-      Camera removed. Restart <code>python -m mirage</code> for this to take effect.
+      Camera removed. Use "Apply changes" to restart the pipeline and pick this up.
     </div>
   }
   @if (justToggled(); as toggled) {
     <div class="restart-banner">
       <app-icon name="checkCircle" [size]="16" />
-      {{ toggled.name }} {{ toggled.enabled ? 'started' : 'stopped' }}. Restart <code>python -m mirage</code> for this to take effect.
+      {{ toggled.name }} will be {{ toggled.enabled ? 'started' : 'stopped' }} once you apply pending changes.
     </div>
   }
 

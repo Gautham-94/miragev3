@@ -20,6 +20,7 @@ def list_cameras(request: Request) -> list[CameraOut]:
             detector=cam.detector,
             record_enabled=cam.record.enabled,
             track_objects=cam.objects.track,
+            track_all=cam.objects.track_all,
         )
         for cam in config.cameras.values()
     ]
@@ -40,4 +41,5 @@ def get_camera(name: str, request: Request) -> CameraOut:
         detector=cam.detector,
         record_enabled=cam.record.enabled,
         track_objects=cam.objects.track,
+        track_all=cam.objects.track_all,
     )

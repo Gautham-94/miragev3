@@ -291,7 +291,7 @@ class MirageApp:
 
         while not self.stop_event.is_set():
             try:
-                camera_name, frame_name, frame_time, tracked_objects, motion_boxes, regions = (
+                camera_name, frame_name, frame_time, tracked_objects, motion_boxes, regions, frame_jpeg = (
                     self.detected_frames_queue.get(timeout=DETECTED_FRAMES_QUEUE_TIMEOUT)
                 )
             except queue_module.Empty:
@@ -303,9 +303,41 @@ class MirageApp:
             if camera is None:
                 continue
 
+            # Merge in any still-live open-vocab synthetic tracks (see
+            # mirage.openvocab.dispatcher.SyntheticTrack's docstring) BEFORE
+            # EventProcessor/ReviewSegmentMaintainer run, so a real OWLv2 match for a
+            # camera's Track objects word (e.g. "animals", auto-provisioned via
+            # mirage.api.routers.config._sync_track_object_queries) or a manual saved
+            # query drives a real Event/ReviewSegment through the exact same
+            # start/update/end diff logic a closed-vocab detection does -- rather than
+            # being a second, disconnected notification path (QueryMatch rows alone,
+            # which is all that existed before this bridge). Built as a SEPARATE dict,
+            # not a mutation of `tracked_objects` itself: the raw tracker-produced dict
+            # is still what openvocab_dispatcher.process_frame needs below (it decides
+            # whether to check GATE 1 using each object's real is_false_positive
+            # status, and synthetic entries are never gate-1 candidates themselves --
+            # they're the dispatcher's OUTPUT, not its input).
+            objects_for_review = tracked_objects
+            synthetic_frame_jpegs: dict[str, bytes] = {}
+            if self.openvocab_dispatcher is not None:
+                synthetic = self.openvocab_dispatcher.synthetic_tracked_objects(camera_name, frame_time)
+                if synthetic:
+                    objects_for_review = {**tracked_objects, **synthetic}
+                    # MUST be called after synthetic_tracked_objects() above for this
+                    # same (camera_name, frame_time) -- see synthetic_frame_jpegs()'s
+                    # own docstring. Gives EventProcessor a per-object clean-frame
+                    # override for direct-frame-mode open-vocab matches, which were
+                    # detected in a completely separate frame than `frame_jpeg`
+                    # (TODO_FIX_LIST.md item 9/11 -- open-vocab Events previously never
+                    # got a real snapshot box at all).
+                    synthetic_frame_jpegs = self.openvocab_dispatcher.synthetic_frame_jpegs(camera_name)
+
             try:
-                self.event_processor.process(camera, frame_time, tracked_objects)
-                self.review_maintainer.process(camera, frame_time, tracked_objects)
+                self.event_processor.process(
+                    camera, frame_time, objects_for_review, frame_jpeg=frame_jpeg,
+                    object_frame_jpegs=synthetic_frame_jpegs,
+                )
+                self.review_maintainer.process(camera, frame_time, objects_for_review, frame_jpeg=frame_jpeg)
             except Exception:
                 logger.exception("%s: error consuming tracked-object result", camera_name)
 

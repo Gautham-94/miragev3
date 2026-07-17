@@ -45,7 +45,11 @@ class Event(BaseModel):
     end_time = DateTimeField(null=True, index=True)
     score = FloatField(default=0.0)
     top_score = FloatField(default=0.0)
-    false_positive = BooleanField(default=True)
+    # Indexed because it's the default filter on GET /api/events (the frontend never
+    # opts into include_false_positive=true), applied on essentially every request to
+    # the most frequently-polled list endpoint -- see OPTIMIZATION_OPPORTUNITIES.md
+    # item 11. camera/label/start_time/end_time were already indexed; this one wasn't.
+    false_positive = BooleanField(default=True, index=True)
     zones = JSONField(default=list)
     has_clip = BooleanField(default=False)
     has_snapshot = BooleanField(default=False)

@@ -1,7 +1,8 @@
 import { Component, DestroyRef, OnInit, computed, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { interval, startWith, switchMap } from 'rxjs';
+import { switchMap } from 'rxjs';
 
+import { visibleInterval } from '../../core/rxjs/visible-interval';
 import { ApiService } from '../../core/services/api.service';
 import { Recording } from '../../core/models/api.models';
 import { FilterOption, FilterSelect } from '../../shared/filter-select/filter-select';
@@ -57,9 +58,8 @@ export class RecordingsPage implements OnInit {
   constructor(private readonly api: ApiService, private readonly destroyRef: DestroyRef) {}
 
   ngOnInit(): void {
-    interval(POLL_MS)
+    visibleInterval(POLL_MS)
       .pipe(
-        startWith(0),
         switchMap(() => this.api.listRecordings({ limit: 200 })),
         takeUntilDestroyed(this.destroyRef),
       )

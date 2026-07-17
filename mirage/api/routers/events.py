@@ -3,10 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from mirage.api.schemas import EventOut
 from mirage.db.models import Event
+from mirage.util.thumbnail import draw_boxes_on_jpeg_bytes
 from mirage.util.time import utc_from_timestamp
 
 router = APIRouter(prefix="/api/events", tags=["events"])
@@ -47,7 +48,16 @@ def get_event(event_id: str) -> EventOut:
 
 
 @router.get("/{event_id}/snapshot")
-def get_event_snapshot(event_id: str) -> FileResponse:
+def get_event_snapshot(
+    event_id: str,
+    bbox: bool = Query(True, description="draw bounding boxes for every confirmed object in the frame"),
+) -> Response:
+    """The stored file (event.snapshot_path) is always the CLEAN, unannotated frame --
+    see mirage.util.thumbnail's own module docstring for why (mirrors Frigate's own
+    confirmed design). Boxes are drawn fresh on every request from
+    event.data["snapshot_boxes"] when bbox=True (the default) -- pass bbox=false to get
+    the raw clean file back, e.g. for downloading an unannotated copy.
+    """
     event = Event.get_or_none(Event.id == event_id)
     if event is None:
         raise HTTPException(status_code=404, detail=f"unknown event {event_id!r}")
@@ -56,4 +66,19 @@ def get_event_snapshot(event_id: str) -> FileResponse:
     path = Path(event.snapshot_path)
     if not path.exists():
         raise HTTPException(status_code=410, detail=f"snapshot file no longer exists on disk: {event.snapshot_path}")
-    return FileResponse(path, media_type="image/jpeg")
+
+    if not bbox:
+        return FileResponse(path, media_type="image/jpeg")
+
+    snapshot_boxes = (event.data or {}).get("snapshot_boxes") or []
+    if not snapshot_boxes:
+        return FileResponse(path, media_type="image/jpeg")
+
+    boxes = [(entry["label"], tuple(entry["box"])) for entry in snapshot_boxes]
+    boxed_bytes = draw_boxes_on_jpeg_bytes(path.read_bytes(), boxes)
+    if boxed_bytes is None:
+        # Drawing failed (corrupt file, decode error) -- serve the clean original
+        # rather than a 500, matching draw_boxes_on_jpeg_bytes's own best-effort contract.
+        return FileResponse(path, media_type="image/jpeg")
+
+    return Response(boxed_bytes, media_type="image/jpeg")

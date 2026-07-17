@@ -2,7 +2,13 @@
   <div class="page-header">
     <div>
       <h1 class="page-title">Live</h1>
-      <p class="page-subtitle">{{ cameras().length }} camera{{ cameras().length === 1 ? '' : 's' }} configured</p>
+      <p class="page-subtitle">
+        @if (liveCameras().length === cameras().length) {
+          {{ cameras().length }} camera{{ cameras().length === 1 ? '' : 's' }} configured
+        } @else {
+          {{ liveCameras().length }} of {{ cameras().length }} camera{{ cameras().length === 1 ? '' : 's' }} enabled
+        }
+      </p>
     </div>
   </div>
 
@@ -11,9 +17,14 @@
       <span class="eyebrow">no cameras configured</span>
       <p>Add a camera to config/mirage.yaml to see it here.</p>
     </div>
+  } @else if (!loading() && liveCameras().length === 0) {
+    <div class="empty-state">
+      <span class="eyebrow">no cameras enabled</span>
+      <p>Every configured camera is currently disabled. Enable one on the Manage Cameras page to see it here.</p>
+    </div>
   } @else {
     <div class="camera-grid">
-      @for (camera of cameras(); track camera.name) {
+      @for (camera of liveCameras(); track camera.name) {
         <app-camera-tile [camera]="camera" />
       }
     </div>

@@ -68,7 +68,28 @@ def test_list_cameras_returns_configured_camera(client):
     assert data[0]["width"] == 640
     assert data[0]["height"] == 480
     assert data[0]["track_objects"] == ["person", "car"]
+    assert data[0]["track_all"] is False
     assert data[0]["record_enabled"] is True
+
+
+def test_list_cameras_reflects_track_all_true():
+    camera = CameraConfig(
+        name="wide_open_cam",
+        ffmpeg=FfmpegConfig(inputs=[CameraInputConfig(path="rtsp://127.0.0.1/x")]),
+        detect=DetectConfig(width=640, height=480, fps=5),
+        objects=ObjectsConfig(track=["person"], track_all=True),
+        record=RecordConfig(enabled=True),
+        detector="general",
+    )
+    detector = DetectorInstanceConfig(name="general", model=ModelConfig(model_path="x.onnx", labelmap_path="x.txt"), device="onnx_yolov8")
+    config = MirageConfig(detectors={"general": detector}, cameras={"wide_open_cam": camera})
+
+    with tempfile.TemporaryDirectory() as tmp:
+        app = create_app(config, db_path=str(Path(tmp) / "test.db"))
+        with TestClient(app) as c:
+            resp = c.get("/api/cameras/wide_open_cam")
+
+    assert resp.json()["track_all"] is True
 
 
 def test_get_camera_by_name(client):
@@ -177,6 +198,89 @@ def test_get_event_snapshot_serves_real_file(client):
         assert resp.status_code == 200
         assert resp.content == b"\xff\xd8fakejpegbytes"
         assert resp.headers["content-type"] == "image/jpeg"
+    finally:
+        Path(real_path).unlink(missing_ok=True)
+
+
+def _real_jpeg(width: int = 100, height: int = 80) -> bytes:
+    import cv2
+    import numpy as np
+
+    image = np.full((height, width, 3), 128, dtype=np.uint8)
+    ok, encoded = cv2.imencode(".jpg", image)
+    assert ok
+    return encoded.tobytes()
+
+
+def test_get_event_snapshot_draws_boxes_by_default_when_snapshot_boxes_present(client):
+    """Boxes are rendered on demand at request time from Event.data["snapshot_boxes"]
+    -- the stored file itself stays clean/unannotated (mirrors Frigate's own design,
+    see mirage/util/thumbnail.py's module docstring). Default bbox=True should return
+    bytes that decode successfully and differ from the stored clean file.
+    """
+    import cv2
+    import numpy as np
+
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
+        clean_jpeg = _real_jpeg()
+        f.write(clean_jpeg)
+        real_path = f.name
+    try:
+        Event.create(
+            id="ev1", label="person", camera="front_door",
+            start_time=utc_from_timestamp(1000.0), score=0.9, top_score=0.9, false_positive=False,
+            snapshot_path=real_path,
+            data={"box": [10.0, 10.0, 50.0, 60.0], "snapshot_boxes": [{"label": "person", "box": [10.0, 10.0, 50.0, 60.0]}]},
+        )
+        resp = client.get("/api/events/ev1/snapshot")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "image/jpeg"
+        assert resp.content != clean_jpeg  # boxes were actually drawn, different bytes
+
+        arr = np.frombuffer(resp.content, dtype=np.uint8)
+        decoded = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        assert decoded is not None
+        border_pixel = decoded[10, 30]
+        background_pixel = decoded[70, 90]
+        assert not np.array_equal(border_pixel, background_pixel)
+    finally:
+        Path(real_path).unlink(missing_ok=True)
+
+
+def test_get_event_snapshot_bbox_false_returns_clean_file(client):
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
+        clean_jpeg = _real_jpeg()
+        f.write(clean_jpeg)
+        real_path = f.name
+    try:
+        Event.create(
+            id="ev1", label="person", camera="front_door",
+            start_time=utc_from_timestamp(1000.0), score=0.9, top_score=0.9, false_positive=False,
+            snapshot_path=real_path,
+            data={"box": [10.0, 10.0, 50.0, 60.0], "snapshot_boxes": [{"label": "person", "box": [10.0, 10.0, 50.0, 60.0]}]},
+        )
+        resp = client.get("/api/events/ev1/snapshot", params={"bbox": "false"})
+        assert resp.status_code == 200
+        assert resp.content == clean_jpeg  # exactly the stored bytes, no drawing
+    finally:
+        Path(real_path).unlink(missing_ok=True)
+
+
+def test_get_event_snapshot_no_snapshot_boxes_returns_clean_file_even_with_bbox_true(client):
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
+        clean_jpeg = _real_jpeg()
+        f.write(clean_jpeg)
+        real_path = f.name
+    try:
+        Event.create(
+            id="ev1", label="person", camera="front_door",
+            start_time=utc_from_timestamp(1000.0), score=0.9, top_score=0.9, false_positive=False,
+            snapshot_path=real_path,
+            data={"box": [10.0, 10.0, 50.0, 60.0]},  # no snapshot_boxes key at all
+        )
+        resp = client.get("/api/events/ev1/snapshot")
+        assert resp.status_code == 200
+        assert resp.content == clean_jpeg
     finally:
         Path(real_path).unlink(missing_ok=True)
 

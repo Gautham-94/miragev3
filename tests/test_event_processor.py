@@ -83,6 +83,215 @@ def test_new_object_with_no_fetcher_leaves_snapshot_unset(db):
     assert row.snapshot_path is None
 
 
+def _real_jpeg(width: int = 100, height: int = 80) -> bytes:
+    import cv2
+    import numpy as np
+
+    image = np.full((height, width, 3), 128, dtype=np.uint8)
+    ok, encoded = cv2.imencode(".jpg", image)
+    assert ok
+    return encoded.tobytes()
+
+
+def test_new_object_with_frame_jpeg_writes_clean_frame_and_never_calls_the_live_fetcher(db):
+    """Regression test for a real bug: the old snapshot path called a LIVE go2rtc
+    fetch independently of when the tracker actually computed the box, so for a
+    moving object the box could land nowhere near its real position by the time that
+    later frame was captured (confirmed against real footage -- see
+    TODO_FIX_LIST.md). When frame_jpeg is available (the actual frame the box was
+    computed from, passed synchronously from CameraTracker's own process), it must be
+    used INSTEAD of the live fetcher -- proven here by never calling the fetcher at
+    all when frame_jpeg is provided. The saved file is the CLEAN frame (unmodified,
+    byte-for-byte identical to frame_jpeg) -- boxes are rendered later, on demand, by
+    the API layer (mirage/api/routers/events.py), not burned in here -- see
+    mirage/util/thumbnail.py's own module docstring for why (mirrors Frigate's design).
+    """
+    with tempfile.TemporaryDirectory() as thumb_dir:
+        fetcher_called = []
+
+        def fetcher_that_must_not_be_called(camera_name: str) -> bytes:
+            fetcher_called.append(camera_name)
+            return b"\xff\xd8livefetchbytes"
+
+        processor = EventProcessor(thumbnail_fetcher=fetcher_that_must_not_be_called, thumb_dir=thumb_dir)
+        camera = _camera()
+        state = _state("obj1", "person", 0.9, box=(10.0, 10.0, 50.0, 60.0), frame_time=100.0)
+        frame_jpeg = _real_jpeg()
+
+        processor.process(camera, 100.0, {"obj1": state}, frame_jpeg=frame_jpeg)
+
+        assert fetcher_called == []
+        row = Event.select().get()
+        assert row.has_snapshot is True
+        assert Path(row.snapshot_path).exists()
+        # the CLEAN frame, byte-for-byte -- not the live-fetch's bytes, and not boxed
+        assert Path(row.snapshot_path).read_bytes() == frame_jpeg
+
+
+def test_new_object_without_frame_jpeg_falls_back_to_live_fetcher(db):
+    with tempfile.TemporaryDirectory() as thumb_dir:
+        fetched = []
+
+        def fake_fetcher(camera_name: str) -> bytes:
+            fetched.append(camera_name)
+            return b"\xff\xd8fakejpegbytes"
+
+        processor = EventProcessor(thumbnail_fetcher=fake_fetcher, thumb_dir=thumb_dir)
+        camera = _camera()
+        state = _state("obj1", "person", 0.9, frame_time=100.0)
+
+        processor.process(camera, 100.0, {"obj1": state}, frame_jpeg=None)
+
+        assert fetched == ["cam1"]
+
+
+def test_new_event_stores_snapshot_boxes_for_every_confirmed_object_in_frame(db):
+    """Real bug the user found: a snapshot only ever showed a box for the ONE object
+    that triggered this particular Event, even when multiple other people were
+    clearly visible and already confirmed in the same frame. The fix stores every
+    Gate-1-confirmed object's box in Event.data["snapshot_boxes"] (rendered on demand
+    by mirage/api/routers/events.py, not burned into the file here -- see
+    mirage/util/thumbnail.py's module docstring), not just the triggering one.
+    """
+    with tempfile.TemporaryDirectory() as thumb_dir:
+        processor = EventProcessor(thumb_dir=thumb_dir)
+        camera = _camera()
+
+        # obj1 is the NEW object that triggers this Event's creation; obj2 is a
+        # DIFFERENT, already-confirmed object visible in the same frame.
+        new_state = _state("obj1", "person", 0.9, box=(10.0, 10.0, 50.0, 60.0), frame_time=100.0, is_false_positive=False)
+        other_state = _state("obj2", "person", 0.85, box=(100.0, 80.0, 180.0, 140.0), frame_time=100.0, is_false_positive=False)
+
+        processor.process(camera, 100.0, {"obj1": new_state, "obj2": other_state}, frame_jpeg=_real_jpeg())
+
+        row = Event.select().where(Event.camera == "cam1").get()
+        boxes = row.data["snapshot_boxes"]
+        assert len(boxes) == 2
+        assert {"label": "person", "box": [10.0, 10.0, 50.0, 60.0]} in boxes
+        assert {"label": "person", "box": [100.0, 80.0, 180.0, 140.0]} in boxes
+
+
+def test_new_event_snapshot_boxes_excludes_unconfirmed_objects(db):
+    """An object still mid initialization_delay (is_false_positive still True) must
+    NOT appear in snapshot_boxes -- it might still turn out to be noise.
+    """
+    with tempfile.TemporaryDirectory() as thumb_dir:
+        processor = EventProcessor(thumb_dir=thumb_dir)
+        camera = _camera()
+
+        confirmed = _state("obj1", "person", 0.9, box=(10.0, 10.0, 50.0, 60.0), frame_time=100.0, is_false_positive=False)
+        unconfirmed = _state("obj2", "person", 0.3, box=(100.0, 80.0, 180.0, 140.0), frame_time=100.0, is_false_positive=True)
+
+        processor.process(camera, 100.0, {"obj1": confirmed, "obj2": unconfirmed}, frame_jpeg=_real_jpeg())
+
+        row = Event.select().where(Event.camera == "cam1").get()
+        boxes = row.data["snapshot_boxes"]
+        assert len(boxes) == 1
+        assert boxes[0]["box"] == [10.0, 10.0, 50.0, 60.0]
+
+
+def test_snapshot_boxes_survive_a_later_throttled_update(db):
+    """Real bug caught live: Event.update(data=...) REPLACES the whole JSON field, so
+    an _on_update call writing {"box": ...} alone silently wiped out snapshot_boxes
+    that _on_start had just set -- a fresh Event's snapshot had a correct box
+    immediately after creation, then no box at all by the time its track ended. Must
+    survive every subsequent update, unchanged (see _on_update's own comment for why
+    it must stay UNCHANGED, not recomputed from the later frame's box position).
+    """
+    with tempfile.TemporaryDirectory() as thumb_dir:
+        processor = EventProcessor(thumb_dir=thumb_dir)
+        camera = _camera()
+
+        state1 = _state("obj1", "person", 0.5, box=(10.0, 10.0, 50.0, 60.0), frame_time=100.0, is_false_positive=False)
+        processor.process(camera, 100.0, {"obj1": state1}, frame_jpeg=_real_jpeg())
+
+        row_after_start = Event.select().where(Event.camera == "cam1").get()
+        assert row_after_start.data["snapshot_boxes"] == [{"label": "person", "box": [10.0, 10.0, 50.0, 60.0]}]
+
+        # Force an immediate DB write on the next frame (top_score increases, so
+        # _should_update_db returns True even though we're well inside the 5s
+        # throttle window) -- this is the exact call that used to wipe snapshot_boxes.
+        state2 = _state("obj1", "person", 0.95, box=(400.0, 300.0, 450.0, 350.0), frame_time=100.5, is_false_positive=False)
+        processor.process(camera, 100.5, {"obj1": state2})
+
+        row_after_update = Event.select().where(Event.camera == "cam1").get()
+        # snapshot_boxes preserved EXACTLY as it was at creation -- NOT recomputed
+        # from state2's new (400, 300, 450, 350) box, since the saved snapshot IMAGE
+        # is still the original frame from creation time, never re-captured.
+        assert row_after_update.data["snapshot_boxes"] == [{"label": "person", "box": [10.0, 10.0, 50.0, 60.0]}]
+        assert row_after_update.top_score == 0.95  # the actual update DID apply
+
+
+# --------------------------------------------------------------------------------------
+# object_frame_jpegs (TODO_FIX_LIST.md item 9/11) -- an open-vocab direct-frame-mode
+# synthetic track was detected in a COMPLETELY DIFFERENT frame than the shared
+# closed-vocab frame_jpeg, so it needs its OWN clean frame + box, not the shared one
+# (and NOT every other confirmed object's box, which belongs to a different frame
+# entirely and would land on the wrong pixels of this object's own frame).
+# --------------------------------------------------------------------------------------
+
+
+def test_object_with_a_per_object_frame_override_uses_that_frame_not_the_shared_one(db):
+    with tempfile.TemporaryDirectory() as thumb_dir:
+        processor = EventProcessor(thumb_dir=thumb_dir)
+        camera = _camera()
+
+        state = _state("openvocab-1", "animals", 0.42, box=(20.0, 20.0, 60.0, 70.0), frame_time=100.0, is_false_positive=False)
+        shared_frame = _real_jpeg(width=100, height=80)
+        own_frame = _real_jpeg(width=50, height=40)
+
+        processor.process(
+            camera, 100.0, {"openvocab-1": state},
+            frame_jpeg=shared_frame, object_frame_jpegs={"openvocab-1": own_frame},
+        )
+
+        row = Event.select().where(Event.camera == "cam1").get()
+        assert Path(row.snapshot_path).read_bytes() == own_frame
+        assert Path(row.snapshot_path).read_bytes() != shared_frame
+
+
+def test_object_with_a_per_object_frame_override_only_boxes_itself_not_other_confirmed_objects(db):
+    """The core bug this fix closes: an open-vocab match's own frame must ONLY show
+    its own box -- boxing every other confirmed closed-vocab object too (as the
+    shared-frame path correctly does) would draw boxes from a DIFFERENT frame onto
+    this object's own image, landing on the wrong pixels.
+    """
+    with tempfile.TemporaryDirectory() as thumb_dir:
+        processor = EventProcessor(thumb_dir=thumb_dir)
+        camera = _camera()
+
+        openvocab_state = _state(
+            "openvocab-1", "animals", 0.42, box=(20.0, 20.0, 60.0, 70.0), frame_time=100.0, is_false_positive=False,
+        )
+        other_confirmed_state = _state(
+            "obj2", "person", 0.9, box=(100.0, 80.0, 180.0, 140.0), frame_time=100.0, is_false_positive=False,
+        )
+        own_frame = _real_jpeg(width=50, height=40)
+
+        processor.process(
+            camera, 100.0, {"openvocab-1": openvocab_state, "obj2": other_confirmed_state},
+            frame_jpeg=_real_jpeg(), object_frame_jpegs={"openvocab-1": own_frame},
+        )
+
+        row = Event.select().where(Event.label == "animals").get()
+        boxes = row.data["snapshot_boxes"]
+        assert boxes == [{"label": "animals", "box": [20.0, 20.0, 60.0, 70.0]}]
+
+
+def test_object_without_a_frame_override_falls_back_to_the_shared_frame_jpeg(db):
+    with tempfile.TemporaryDirectory() as thumb_dir:
+        processor = EventProcessor(thumb_dir=thumb_dir)
+        camera = _camera()
+
+        state = _state("obj1", "person", 0.9, box=(10.0, 10.0, 50.0, 60.0), frame_time=100.0, is_false_positive=False)
+        shared_frame = _real_jpeg()
+
+        processor.process(camera, 100.0, {"obj1": state}, frame_jpeg=shared_frame, object_frame_jpegs={})
+
+        row = Event.select().where(Event.camera == "cam1").get()
+        assert Path(row.snapshot_path).read_bytes() == shared_frame
+
+
 def test_object_removed_sets_end_time(db):
     processor = EventProcessor()
     camera = _camera()

@@ -10,6 +10,7 @@ export interface Camera {
   detector: string;
   record_enabled: boolean;
   track_objects: string[];
+  track_all: boolean;
 }
 
 export interface Event {
@@ -81,6 +82,18 @@ export interface ReviewListParams {
 
 export type ExecutionProvider = 'auto' | 'cpu' | 'coreml' | 'cuda';
 
+// mirage.supervisor's own possible states (mirage/supervisor.py) -- "unknown" means the
+// backend has no status file yet (mirage.supervisor was never run, or mirage.api was
+// started before it ran once); the frontend treats that the same as a healthy idle state
+// (no banner), since there's nothing actionable to show.
+export type SystemState = 'unknown' | 'starting' | 'running' | 'stopping' | 'stopped' | 'crashed';
+
+export interface SystemStatus {
+  state: SystemState;
+  pid: number | null;
+  updated_at: number | null;
+}
+
 export interface Detector {
   name: string;
   device: string;
@@ -111,6 +124,7 @@ export interface CameraWriteRequest {
   rtsp_url: string;
   detector: string;
   track_objects?: string[];
+  track_all?: boolean;
   width?: number;
   height?: number;
   fps?: number;
@@ -133,6 +147,7 @@ export interface CameraConfigDetail {
   detector: string;
   record_enabled: boolean;
   track_objects: string[];
+  track_all: boolean;
   rtsp_url: string;
   rtsp_transport: RtspTransport;
   retain_days: number;
@@ -146,6 +161,10 @@ export interface ConfigMutationResponse {
   ok: boolean;
   restart_required: boolean;
   camera: Camera;
+  // Which of the saved camera's Track objects words aren't in its detector's
+  // vocabulary and are therefore being checked via open-vocabulary search instead
+  // (see mirage/api/routers/config.py's _sync_track_object_queries).
+  open_vocab_terms: string[];
 }
 
 export interface OnvifDevice {
@@ -160,11 +179,14 @@ export interface OnvifResolveResult {
   device_name: string | null;
 }
 
+export type QuerySource = 'manual' | 'track_objects';
+
 export interface Query {
   id: string;
   text: string;
   cameras: string[];
   enabled: boolean;
+  source: QuerySource;
 }
 
 export interface QueryWriteRequest {

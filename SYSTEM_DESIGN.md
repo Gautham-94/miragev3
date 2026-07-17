@@ -370,7 +370,10 @@ returns.
 
 ### Query scoping and match persistence
 
-`OpenVocabQuery`: `{id, text, cameras: list[str] (empty means all cameras), enabled}`.
+`OpenVocabQuery`: `{id, text, cameras: list[str] (empty means all cameras), enabled,
+source: "manual" | "track_objects"}` — `source` distinguishes a query added directly on
+the Queries page from one auto-provisioned by a camera's Track objects field (see the
+track_objects → open-vocabulary bridge above).
 `MirageConfig` has a cross-field validator rejecting a query scoped to an unknown camera
 name. The dispatcher filters queries down to `enabled and (not cameras or camera.name in
 cameras)` *before* doing any SHM read at all — a camera with no applicable queries skips
@@ -386,6 +389,75 @@ never blocks match persistence).
 `OpenVocabProcess` is only spawned at all if at least one enabled query exists,
 specifically to avoid loading a ~600MB model for the common case of zero configured
 queries.
+
+### The track_objects → open-vocabulary bridge (`mirage/api/routers/config.py`, `mirage/openvocab/dispatcher.py`)
+
+Originally, a `CameraConfig.objects.track` word that wasn't one of the routed
+detector's real labels (e.g. `"animals"` — COCO has no generic animal class, only 10
+specific species) was a silently dead config value: `orchestration.py`'s membership
+check (`if label not in self.camera.objects.track`) simply never saw that label emitted
+by the closed-vocab detector, so nothing happened, with zero user-facing feedback. This
+bridge makes such a word actually work, end to end, without a separate trip to the
+Queries page:
+
+1. **Split at write-time** (`split_track_objects()`, `mirage/config/schema.py`) — every
+   camera create/update resolves the camera's routed detector's real labelmap (via
+   `mirage.detection.labelmap.load_labels`) and splits `objects.track` into
+   closed-vocab (real labels) vs. open-vocab (everything else) terms, case-insensitively.
+2. **Auto-provision a query** (`_sync_track_object_queries()`) — each open-vocab term
+   gets an `OpenVocabQuery` auto-created (or updated/removed to stay in lockstep on
+   every subsequent save), scoped to that camera, tagged `source="track_objects"`
+   (as opposed to `"manual"`, for a query added directly on the Queries page). Removing
+   the word from `objects.track` deletes its auto-provisioned query; deleting the
+   camera does too.
+3. **Auto-enable direct-frame mode** — a camera with any open-vocab track term gets
+   `openvocab_direct_frame` flipped on automatically (only ever turned on as a side
+   effect here, never back off), since there's no confirmed closed-vocab object to crop
+   for a word that detector doesn't recognize at all.
+4. **Auto-add to alert labels** — each open-vocab term is also appended to
+   `camera.review.alerts.labels`, so a real match drives `ReviewSegmentMaintainer`
+   severity the same way a native label like `"person"` already does.
+5. **Match → synthetic tracked object** (`OpenVocabDispatcher.synthetic_tracked_objects()`,
+   `SyntheticTrack` dataclass) — the actual bridge that makes a real OWLv2 match show up
+   as a real `Event`/`ReviewSegment`, not just a `QueryMatch` row. `_synthetic_tracks` is
+   keyed by `(camera_name, query_text) -> list[SyntheticTrack]` — a **list**, not a
+   single track, because one OWLv2 call can genuinely return multiple simultaneous
+   matches for the same query (e.g. two separate animals both in frame at once,
+   confirmed against real garage footage) and collapsing them into one track would
+   silently undercount multi-instance activity. On each real match arriving in
+   `_drain_results()`, `_upsert_synthetic_track()` associates it by IoU (via
+   `mirage.tracking.stationary.iou`, threshold `SYNTHETIC_TRACK_MATCH_IOU_THRESHOLD` =
+   0.3) against this query's other currently-*live* tracks for this camera — a box that
+   clearly overlaps an existing live track updates it in place (same synthetic id, one
+   continuous `Event`); a box that doesn't overlap well enough becomes a brand-new
+   track (new id, a genuinely separate `Event`) — the same greedy nearest-neighbor
+   association idea norfair itself uses for the closed-vocab tracker, minus the Kalman
+   filter (unnecessary here since OWLv2 calls are seconds apart, not frame-to-frame). An
+   *expired* track is never considered a valid association candidate, so a stale track
+   can't "steal" a spatially-close new match. Once per camera per frame,
+   `mirage.app._result_consumer_loop` calls `synthetic_tracked_objects(camera_name,
+   frame_time)` — returning every still-live (matched within `SYNTHETIC_TRACK_TTL_SECONDS`
+   = 20s) synthetic track, *possibly several per query*, as real `TrackedObjectState`s
+   (permanently non-stationary, `is_false_positive=False`) — and merges these into that
+   frame's `tracked_objects` dict *before* `EventProcessor.process()`/
+   `ReviewSegmentMaintainer.process()` run, so each distinct sighting drives the exact
+   same start/update/end lifecycle a closed-vocab detection does. This merged dict is
+   built separately from the raw tracker-produced `tracked_objects` still passed to
+   `openvocab_dispatcher.process_frame()` itself (the dispatcher's gating logic needs
+   the real, ungated tracked-object set as its input, not its own synthesized output). A
+   synthetic track that stops getting matches simply ages out of the merged dict on a
+   later frame, which is what makes `EventProcessor`'s normal diff logic close out its
+   `Event` — no separate "end" signal needed.
+6. This applies to **both** auto-provisioned and manually-added (Queries page) queries
+   equally — any real match becomes a synthetic tracked object. The two only differ in
+   whether the term is auto-added to `alerts.labels` (only track_objects-sourced terms
+   are, since a manual query's text is often a full sentence, not a label anyone would
+   want listed as a review-severity category).
+
+An auto-provisioned query cannot be edited or deleted directly via
+`PUT`/`DELETE /api/config/queries/{id}` (409) — it's meant to be changed by editing the
+word in the owning camera's Track objects field instead, so the two can't drift out of
+sync.
 
 ---
 

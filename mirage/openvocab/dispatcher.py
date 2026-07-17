@@ -1,6 +1,14 @@
 """OpenVocabDispatcher: lives in the main process's result-consumer loop (see
 mirage.app.MirageApp._result_consumer_loop), sitting alongside EventProcessor and
-ReviewSegmentMaintainer as a third consumer of each frame's tracked_objects.
+ReviewSegmentMaintainer as a third consumer of each frame's tracked_objects -- AND,
+since the track_objects/open-vocab bridge was built (see synthetic_tracked_objects()
+below), as a PRODUCER that feeds synthetic entries back INTO tracked_objects before
+EventProcessor/ReviewSegmentMaintainer run, so a real OWLv2 match for an
+auto-provisioned query (e.g. "animals", typed into a camera's Track objects field --
+see mirage/api/routers/config.py's _sync_track_object_queries) drives a real Event and
+ReviewSegment through the EXACT SAME code path a closed-vocab detection does, rather
+than being a second, disconnected notification system. See synthetic_tracked_objects()'s
+own docstring for why this has to happen in _drain_results, not process_frame.
 
 Two independent dispatch modes, selected per-camera by CameraConfig.openvocab_direct_frame:
 
@@ -37,6 +45,7 @@ dependency on the ring buffer's lifetime.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import queue as queue_module
 import time
@@ -50,7 +59,8 @@ from mirage.const import QUERY_MATCH_THUMB_DIR
 from mirage.db.models import QueryMatch
 from mirage.detection.tensor import crop_yuv_region, yuv420_to_rgb
 from mirage.openvocab.gating import OpenVocabGate
-from mirage.openvocab.process import OpenVocabRequest, OpenVocabResult
+from mirage.openvocab.process import OpenVocabMatch, OpenVocabRequest, OpenVocabResult
+from mirage.tracking.stationary import StationaryClassifier, iou
 from mirage.tracking.tracker import TrackedObjectState
 from mirage.util.shm import SharedMemoryFrameManager
 from mirage.util.time import utc_from_timestamp
@@ -61,6 +71,71 @@ logger = logging.getLogger(__name__)
 # behind them -- QueryMatch.object_id is a required column, and this still uniquely
 # identifies which specific frame produced the match without needing a schema change.
 _DIRECT_FRAME_OBJECT_ID_PREFIX = "frame-"
+
+# How long a synthetic tracked object (see SyntheticTrack below) stays "alive" in
+# tracked_objects after its most recent real OWLv2 match, before EventProcessor/
+# ReviewSegmentMaintainer see it disappear and close out the Event/ReviewSegment it
+# drove. Deliberately generous relative to OpenVocabGate's own MIN_RECHECK_INTERVAL_
+# SECONDS (5s, mirage/openvocab/gating.py) -- a real animal standing in frame for 20s
+# might only get re-matched every 5-10s (Gate 2's hash-dedup can skip a recheck if the
+# crop looks unchanged), and this needs to comfortably outlive that gap so a still-
+# present animal doesn't flicker its Event/ReviewSegment closed and reopened between
+# individual OWLv2 calls.
+SYNTHETIC_TRACK_TTL_SECONDS = 20.0
+
+# Minimum IoU (see mirage.tracking.stationary.iou) between an incoming match's box and
+# an existing live SyntheticTrack for the SAME (camera, query_text) to be treated as
+# "the same ongoing sighting, box moved a bit" rather than "a genuinely different,
+# simultaneous instance" (e.g. a second animal that entered frame while the first one
+# was still there). No real tuning basis yet -- chosen as a permissive-but-not-trivial
+# starting point, same caveat as OpenVocabGate.DEFAULT_HAMMING_THRESHOLD.
+SYNTHETIC_TRACK_MATCH_IOU_THRESHOLD = 0.3
+
+
+@dataclasses.dataclass
+class SyntheticTrack:
+    """One DISTINCT open-vocab sighting's "currently active" state for one camera and
+    query, bridging a real OWLv2 match into the SAME dict[str, TrackedObjectState]
+    shape EventProcessor and ReviewSegmentMaintainer already consume from the
+    closed-vocab pipeline -- see this module's top docstring for why.
+
+    OpenVocabDispatcher._synthetic_tracks is keyed by (camera_name, query_text) ->
+    list[SyntheticTrack], NOT a single track per key -- a single OWLv2 call can
+    genuinely return multiple simultaneous matches for the same query (e.g. two
+    separate animals both in frame at once; confirmed directly against real garage
+    footage, where one direct-frame dispatch returned several distinct boxes for
+    "animals" in a single response). Collapsing them all into one track per
+    (camera, query) would silently undercount multi-instance activity -- "how many
+    animals" would always read as "an animal, at most one" regardless of how many were
+    actually present. Each incoming match is instead matched by IoU (see
+    SYNTHETIC_TRACK_MATCH_IOU_THRESHOLD) against this query's OTHER currently-live
+    tracks for this camera: a box that clearly overlaps an existing track updates it in
+    place (same object_id, so EventProcessor sees one continuous Event); a box that
+    doesn't overlap any existing live track well enough becomes a NEW track (new
+    object_id, a genuinely separate Event) -- the same greedy nearest-neighbor
+    association idea norfair itself uses for the closed-vocab tracker, just without a
+    Kalman filter, since OWLv2 calls are too infrequent (seconds apart) for
+    frame-to-frame motion prediction to be meaningful here anyway.
+
+    Unlike a real norfair track, a match has no continuous identity across frames
+    (direct-frame mode's object_id is a fresh "frame-<timestamp>" every single call,
+    and even confirmed-object mode's object_id is the CLOSED-vocab tracker's id, not
+    something OWLv2 itself maintains) -- IoU-based association within (camera, query)
+    is the only stable identity a repeated match for "the same ongoing sighting" can
+    have here.
+    """
+
+    object_id: str  # synthetic TrackedObjectState.id, stable for this sighting's lifetime
+    label: str  # the query text itself, e.g. "animals" -- becomes Event.label / ReviewSegment's objects entry
+    box: tuple[float, float, float, float]  # last match's box, full-frame pixel coords (x1, y1, x2, y2)
+    score: float
+    last_seen: float  # frame_time of the most recent real match, for TTL expiry
+    # The exact frame OWLv2 was checking for this match, ONLY for direct-frame-mode
+    # matches (None for confirmed-object mode) -- see synthetic_frame_jpegs()'s
+    # docstring for why confirmed-object mode's crop can't be used the same way.
+    # Updated on every subsequent match too (like `box`/`score` above), so an Event
+    # snapshot always reflects the MOST RECENT sighting's frame, not the first one.
+    frame_jpeg: bytes | None = None
 
 
 class OpenVocabDispatcher:
@@ -80,6 +155,14 @@ class OpenVocabDispatcher:
         # be matched back to which frame/object it was for, since OpenVocabResult only
         # carries what OpenVocabProcess itself was given (it never sees frame_time).
         self._pending: dict[str, tuple[str, str, float]] = {}
+        # camera_name -> query_text -> list[SyntheticTrack] -- see SyntheticTrack's
+        # docstring for why this is a LIST (multiple simultaneous matches for the same
+        # query, e.g. two animals at once, must become two independent tracks, not one
+        # that silently overwrites the other). Populated in _drain_results (a real
+        # match arriving), read by synthetic_tracked_objects() (called once per camera
+        # per frame from mirage.app._result_consumer_loop, BEFORE EventProcessor/
+        # ReviewSegmentMaintainer run for that frame) and expired there too.
+        self._synthetic_tracks: dict[str, dict[str, list[SyntheticTrack]]] = {}
 
     def process_frame(
         self,
@@ -214,6 +297,7 @@ class OpenVocabDispatcher:
 
             self.gate.mark_result_received(result.object_id)
             pending = self._pending.pop(result.request_id, None)
+            matched_frame_time = pending[2] if pending else time.time()
 
             for match in result.matches:
                 match_id = f"{time.time()}-{uuid.uuid4().hex[:6]}"
@@ -224,7 +308,7 @@ class OpenVocabDispatcher:
                     query_text=match.query_text,
                     camera=result.camera_name,
                     object_id=result.object_id,
-                    matched_at=utc_from_timestamp(pending[2]) if pending else utc_from_timestamp(time.time()),
+                    matched_at=utc_from_timestamp(matched_frame_time),
                     score=match.score,
                     box=list(match.box),
                     thumb_path=thumb_path,
@@ -233,6 +317,141 @@ class OpenVocabDispatcher:
                     "openvocab: match found -- camera=%s object=%s query=%r score=%.3f",
                     result.camera_name, result.object_id, match.query_text, match.score,
                 )
+                # Direct-frame mode's crop_jpeg IS the whole motion-triggered frame
+                # (not an object crop), already in the exact coordinate space
+                # match.box is expressed in -- confirmed-object mode's crop_jpeg is a
+                # small crop of a single object, not usable as a whole-frame snapshot
+                # background, so it's deliberately excluded here (frame_jpeg stays
+                # None, and EventProcessor falls back to its existing no-frame path).
+                is_direct_frame_match = result.object_id.startswith(_DIRECT_FRAME_OBJECT_ID_PREFIX)
+                match_frame_jpeg = result.crop_jpeg if is_direct_frame_match else None
+                self._upsert_synthetic_track(result.camera_name, match, matched_frame_time, match_frame_jpeg)
+
+    def _upsert_synthetic_track(
+        self, camera_name: str, match: OpenVocabMatch, frame_time: float, frame_jpeg: bytes | None = None,
+    ) -> None:
+        """Feeds a real match into the SAME dict[str, TrackedObjectState] shape
+        EventProcessor/ReviewSegmentMaintainer already consume -- see this module's top
+        docstring and SyntheticTrack's docstring for why this bridge exists, and why
+        _synthetic_tracks holds a LIST per (camera, query_text) rather than a single
+        track. Associates this match against this query's OTHER currently-live tracks
+        for this camera by IoU (greedy nearest-neighbor, same idea norfair's own
+        association step uses): a box that clearly overlaps an existing live track
+        updates it IN PLACE (same object_id, so EventProcessor sees one continuous
+        Event rather than a new one per OWLv2 call); a box that doesn't overlap any
+        existing live track well enough becomes a brand-new track (new object_id, a
+        genuinely separate Event) -- this is what makes two simultaneous matches for
+        the same query (e.g. two animals at once) surface as two independent alerts
+        instead of silently collapsing into one.
+        """
+        y1, x1, y2, x2 = match.box  # OpenVocabMatch.box is (y1, x1, y2, x2) -- see process.py
+        box = (x1, y1, x2, y2)  # TrackedObjectState.box convention -- see crop_yuv_region's docstring
+
+        by_query = self._synthetic_tracks.setdefault(camera_name, {})
+        existing_tracks = by_query.setdefault(match.query_text, [])
+
+        # Only associate against tracks that are actually still "live" right now (not
+        # expired) -- an old track that hasn't been touched in a while shouldn't have a
+        # brand-new, unrelated sighting silently glommed onto its stale identity just
+        # because it happens to be the best IoU match among a list that's mostly dead.
+        live_candidates = [t for t in existing_tracks if frame_time - t.last_seen <= SYNTHETIC_TRACK_TTL_SECONDS]
+
+        best_match: SyntheticTrack | None = None
+        best_iou = 0.0
+        for track in live_candidates:
+            score = iou(box, track.box)
+            if score > best_iou:
+                best_iou = score
+                best_match = track
+
+        if best_match is not None and best_iou >= SYNTHETIC_TRACK_MATCH_IOU_THRESHOLD:
+            best_match.box = box
+            best_match.score = match.score
+            best_match.last_seen = frame_time
+            if frame_jpeg is not None:
+                best_match.frame_jpeg = frame_jpeg
+        else:
+            existing_tracks.append(
+                SyntheticTrack(
+                    object_id=f"openvocab-{uuid.uuid4().hex}", label=match.query_text,
+                    box=box, score=match.score, last_seen=frame_time, frame_jpeg=frame_jpeg,
+                )
+            )
+
+    def synthetic_tracked_objects(self, camera_name: str, now: float) -> dict[str, TrackedObjectState]:
+        """Called once per camera per frame from mirage.app._result_consumer_loop,
+        BEFORE EventProcessor.process()/ReviewSegmentMaintainer.process() run for that
+        frame -- returns every still-live (matched within SYNTHETIC_TRACK_TTL_SECONDS of
+        `now`) synthetic track for this camera as real TrackedObjectState instances --
+        POSSIBLY MULTIPLE per query_text, see SyntheticTrack's docstring -- so the
+        caller can merge them into that frame's tracked_objects dict and let
+        EventProcessor/ReviewSegmentMaintainer drive a real Event/ReviewSegment for
+        each distinct open-vocab sighting exactly as they would for a closed-vocab
+        detection. Expired entries are dropped from internal state here too (not just
+        filtered from the return value), so a synthetic track's id disappearing from
+        tracked_objects next call is what makes EventProcessor's start/update/end diff
+        correctly close out its Event -- same mechanism a real object's track ending
+        already uses.
+        """
+        by_query = self._synthetic_tracks.get(camera_name)
+        if not by_query:
+            return {}
+
+        live: dict[str, TrackedObjectState] = {}
+        empty_queries = []
+        for query_text, tracks in by_query.items():
+            still_live = [t for t in tracks if now - t.last_seen <= SYNTHETIC_TRACK_TTL_SECONDS]
+            by_query[query_text] = still_live
+            if not still_live:
+                empty_queries.append(query_text)
+                continue
+            for track in still_live:
+                live[track.object_id] = self._to_tracked_object_state(track)
+
+        for query_text in empty_queries:
+            del by_query[query_text]
+        if not by_query:
+            self._synthetic_tracks.pop(camera_name, None)
+
+        return live
+
+    def synthetic_frame_jpegs(self, camera_name: str) -> dict[str, bytes]:
+        """Companion to synthetic_tracked_objects(): the per-object_id clean-frame
+        override EventProcessor._on_start needs to give a direct-frame-mode open-vocab
+        Event a real snapshot with a real box (TODO_FIX_LIST.md item 9/11's "no shared
+        frame" gap) -- confirmed-object-mode matches and matches that haven't landed
+        yet simply aren't present as keys here (their SyntheticTrack.frame_jpeg is
+        None), which is the correct "fall back to the existing no-frame path" signal
+        for the caller. MUST be called AFTER synthetic_tracked_objects() for the same
+        (camera_name, now) in mirage.app._result_consumer_loop -- that call is what
+        prunes expired tracks from internal state; this one only reads, so an expired
+        track's stale frame never leaks into a later call by accident.
+        """
+        by_query = self._synthetic_tracks.get(camera_name)
+        if not by_query:
+            return {}
+        return {
+            track.object_id: track.frame_jpeg
+            for tracks in by_query.values()
+            for track in tracks
+            if track.frame_jpeg is not None
+        }
+
+    def _to_tracked_object_state(self, track: SyntheticTrack) -> TrackedObjectState:
+        return TrackedObjectState(
+            id=track.object_id,
+            label=track.label,
+            box=track.box,
+            score=track.score,
+            # Never stationary -- an open-vocab match has no continuous box history to
+            # judge motionlessness from (each match is an independent OWLv2 call, not a
+            # frame-by-frame position update), and qualifies_for_review
+            # (mirage/events/review.py) would otherwise exclude it entirely once
+            # StationaryClassifier's default threshold_frames was reached.
+            stationary=StationaryClassifier(threshold_frames=10**9),
+            frame_time=track.last_seen,
+            is_false_positive=False,  # already a REAL OWLv2 match -- Gate 1 doesn't apply here
+        )
 
     def _save_thumb(self, result: OpenVocabResult, match_id: str) -> str | None:
         """Writes the exact crop OWLv2 was actually checking (echoed back on

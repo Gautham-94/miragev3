@@ -122,7 +122,7 @@ class MotionConfig(BaseModel):
 class DetectConfig(BaseModel):
     enabled: bool = True
     width: Optional[int] = 640
-    height: Optional[int] = 360
+    height: Optional[int] = 480
     fps: int = 5
     min_initialized: Optional[int] = None  # default: max(fps/2, 2)
     max_disappeared: Optional[int] = None  # default: fps * 5
@@ -190,6 +190,16 @@ class OpenVocabQuery(BaseModel):
     # Empty/unset -- applies to every camera. Non-empty -- only these camera names.
     cameras: list[str] = Field(default_factory=list)
     enabled: bool = True
+    # "manual" (default): created directly on the Queries page, for compositional
+    # descriptions a single track_objects word can't express ("person carrying a red
+    # backpack"). "track_objects": auto-provisioned because a camera's objects.track
+    # list contained a word that isn't in its detector's labelmap (e.g. "animals") --
+    # see split_track_objects() below and mirage/api/routers/config.py's
+    # _sync_track_object_queries(). Auto-provisioned queries are kept in lockstep with
+    # their owning camera's track list (recreated/deleted as that list changes) rather
+    # than being independently editable, so the Queries page shows them read-only and
+    # tags them with which camera's Track objects field they came from.
+    source: str = "manual"
 
 
 # --------------------------------------------------------------------------------------
@@ -208,10 +218,38 @@ class ObjectFilterConfig(BaseModel):
 
 class ObjectsConfig(BaseModel):
     track: list[str] = Field(default_factory=lambda: ["person"])
+    # When True, mirage/tracking/orchestration.py tracks EVERY label the routed
+    # detector emits (e.g. all 80 COCO classes), bypassing the `track` membership
+    # check entirely -- `track` itself is left untouched/ignored while this is on, so
+    # toggling it back off restores whatever was previously configured without the
+    # user needing to re-type it. Deliberately independent of `track`'s own
+    # open-vocab bridge (split_track_objects/_sync_track_object_queries in
+    # mirage/api/routers/config.py): this only ever affects closed-vocab detector
+    # labels, since there's no open-vocab equivalent of "every possible free-text
+    # query" to bypass to.
+    track_all: bool = False
     filters: dict[str, ObjectFilterConfig] = Field(default_factory=dict)
 
     def filter_for(self, label: str) -> ObjectFilterConfig:
         return self.filters.get(label, ObjectFilterConfig())
+
+
+def split_track_objects(track: list[str], known_labels: set[str]) -> tuple[list[str], list[str]]:
+    """Splits a camera's objects.track list into (closed_vocab, open_vocab) terms by
+    checking each word against `known_labels` (the routed detector's actual labelmap,
+    e.g. COCO's 80 classes) case-insensitively. A word not in the labelmap -- e.g.
+    "animals", or any species/object the closed-vocab model was never trained on -- is
+    NOT a dead config value the way it used to be (see TODO_FIX_LIST.md item 4's
+    original problem statement): it's routed to the open-vocabulary path instead, via
+    an auto-provisioned OpenVocabQuery (mirage/api/routers/config.py's
+    _sync_track_object_queries) checked directly against the whole motion-triggered
+    frame (CameraConfig.openvocab_direct_frame). Pure function, no I/O -- callers pass
+    in the labelmap already loaded from disk (mirage.detection.labelmap.load_labels).
+    """
+    known_lower = {label.lower() for label in known_labels}
+    closed_vocab = [word for word in track if word.lower() in known_lower]
+    open_vocab = [word for word in track if word.lower() not in known_lower]
+    return closed_vocab, open_vocab
 
 
 # --------------------------------------------------------------------------------------

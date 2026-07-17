@@ -350,3 +350,363 @@ def test_drained_result_clears_in_flight_gate_state(db, frame_manager):
     dispatcher._drain_results()
 
     assert "obj1" not in dispatcher.gate._in_flight
+
+
+# --------------------------------------------------------------------------------------
+# Synthetic-track bridge: a real OWLv2 match feeds the SAME dict[str, TrackedObjectState]
+# shape EventProcessor/ReviewSegmentMaintainer already consume, so a match for an
+# auto-provisioned (or manual) query drives a real Event/ReviewSegment through the exact
+# same code path a closed-vocab detection does -- see SyntheticTrack's docstring in
+# mirage/openvocab/dispatcher.py.
+# --------------------------------------------------------------------------------------
+
+
+def test_real_match_produces_a_synthetic_tracked_object(db, frame_manager):
+    request_q, result_q = FakeQueue(), FakeQueue()
+    dispatcher = OpenVocabDispatcher(request_q, result_q, frame_manager)
+    dispatcher._pending["req1"] = ("cam1", "frame-100.0", 100.0)
+
+    result_q.put(
+        OpenVocabResult(
+            request_id="req1", camera_name="cam1", object_id="frame-100.0",
+            matches=[OpenVocabMatch(query_id="q1", query_text="animals", score=0.42, box=(5.0, 10.0, 30.0, 40.0))],
+        )
+    )
+    dispatcher._drain_results()
+
+    live = dispatcher.synthetic_tracked_objects("cam1", now=100.5)
+    assert len(live) == 1
+    state = next(iter(live.values()))
+    assert state.label == "animals"
+    assert abs(state.score - 0.42) < 1e-6
+    # OpenVocabMatch.box is (y1, x1, y2, x2); TrackedObjectState.box is (x1, y1, x2, y2)
+    assert state.box == (10.0, 5.0, 40.0, 30.0)
+    assert state.is_false_positive is False
+    assert not state.stationary.is_stationary()
+
+
+def test_repeated_matches_for_same_query_keep_the_same_synthetic_object_id(db, frame_manager):
+    request_q, result_q = FakeQueue(), FakeQueue()
+    dispatcher = OpenVocabDispatcher(request_q, result_q, frame_manager)
+
+    dispatcher._pending["req1"] = ("cam1", "frame-100.0", 100.0)
+    result_q.put(
+        OpenVocabResult(
+            request_id="req1", camera_name="cam1", object_id="frame-100.0",
+            matches=[OpenVocabMatch(query_id="q1", query_text="animals", score=0.3, box=(0.0, 0.0, 10.0, 10.0))],
+        )
+    )
+    dispatcher._drain_results()
+    first_id = next(iter(dispatcher.synthetic_tracked_objects("cam1", now=100.0)))
+
+    dispatcher._pending["req2"] = ("cam1", "frame-105.0", 105.0)
+    result_q.put(
+        OpenVocabResult(
+            request_id="req2", camera_name="cam1", object_id="frame-105.0",
+            matches=[OpenVocabMatch(query_id="q1", query_text="animals", score=0.5, box=(0.0, 0.0, 12.0, 12.0))],
+        )
+    )
+    dispatcher._drain_results()
+    second_id = next(iter(dispatcher.synthetic_tracked_objects("cam1", now=105.0)))
+
+    assert first_id == second_id
+
+
+def test_synthetic_track_expires_after_ttl(db, frame_manager):
+    request_q, result_q = FakeQueue(), FakeQueue()
+    dispatcher = OpenVocabDispatcher(request_q, result_q, frame_manager)
+    dispatcher._pending["req1"] = ("cam1", "frame-100.0", 100.0)
+    result_q.put(
+        OpenVocabResult(
+            request_id="req1", camera_name="cam1", object_id="frame-100.0",
+            matches=[OpenVocabMatch(query_id="q1", query_text="animals", score=0.3, box=(0.0, 0.0, 10.0, 10.0))],
+        )
+    )
+    dispatcher._drain_results()
+
+    # Still alive well within the TTL window.
+    assert len(dispatcher.synthetic_tracked_objects("cam1", now=110.0)) == 1
+    # Long past SYNTHETIC_TRACK_TTL_SECONDS (20s) since the last match at frame_time=100.
+    assert dispatcher.synthetic_tracked_objects("cam1", now=200.0) == {}
+    # Expired entry is actually dropped from internal state, not just filtered on read.
+    assert dispatcher._synthetic_tracks.get("cam1") in (None, {})
+
+
+def test_different_queries_on_same_camera_get_independent_synthetic_objects(db, frame_manager):
+    request_q, result_q = FakeQueue(), FakeQueue()
+    dispatcher = OpenVocabDispatcher(request_q, result_q, frame_manager)
+    dispatcher._pending["req1"] = ("cam1", "frame-100.0", 100.0)
+    result_q.put(
+        OpenVocabResult(
+            request_id="req1", camera_name="cam1", object_id="frame-100.0",
+            matches=[
+                OpenVocabMatch(query_id="q1", query_text="animals", score=0.3, box=(0.0, 0.0, 10.0, 10.0)),
+                OpenVocabMatch(query_id="q2", query_text="a car", score=0.6, box=(1.0, 1.0, 11.0, 11.0)),
+            ],
+        )
+    )
+    dispatcher._drain_results()
+
+    live = dispatcher.synthetic_tracked_objects("cam1", now=100.0)
+    assert len(live) == 2
+    assert {state.label for state in live.values()} == {"animals", "a car"}
+
+
+def test_two_non_overlapping_matches_for_the_same_query_become_two_synthetic_objects(db, frame_manager):
+    """The core multi-instance fix: a single OWLv2 call can genuinely return multiple
+    simultaneous matches for the same query (e.g. two separate animals both in frame at
+    once -- confirmed against real garage footage). These must NOT collapse into one
+    synthetic track that just gets overwritten by whichever match arrives -- each
+    spatially distinct box needs its own object_id, so each drives its own Event.
+    """
+    request_q, result_q = FakeQueue(), FakeQueue()
+    dispatcher = OpenVocabDispatcher(request_q, result_q, frame_manager)
+    dispatcher._pending["req1"] = ("cam1", "frame-100.0", 100.0)
+    result_q.put(
+        OpenVocabResult(
+            request_id="req1", camera_name="cam1", object_id="frame-100.0",
+            matches=[
+                # far-apart boxes (in the (y1,x1,y2,x2) OpenVocabMatch convention) --
+                # essentially zero IoU with each other
+                OpenVocabMatch(query_id="q1", query_text="animals", score=0.3, box=(0.0, 0.0, 10.0, 10.0)),
+                OpenVocabMatch(query_id="q1", query_text="animals", score=0.4, box=(200.0, 200.0, 210.0, 210.0)),
+            ],
+        )
+    )
+    dispatcher._drain_results()
+
+    live = dispatcher.synthetic_tracked_objects("cam1", now=100.0)
+    assert len(live) == 2
+    assert all(state.label == "animals" for state in live.values())
+    boxes = {state.box for state in live.values()}
+    assert len(boxes) == 2  # two genuinely distinct positions, not the same box twice
+
+
+def test_overlapping_match_for_same_query_updates_existing_track_not_a_new_one(db, frame_manager):
+    """The other half of the fix: a match that clearly overlaps an ALREADY-live track
+    for the same query (the same animal, box shifted slightly between OWLv2 calls) must
+    update that track in place -- not spawn a redundant second track for what's really
+    the same ongoing sighting.
+    """
+    request_q, result_q = FakeQueue(), FakeQueue()
+    dispatcher = OpenVocabDispatcher(request_q, result_q, frame_manager)
+
+    dispatcher._pending["req1"] = ("cam1", "frame-100.0", 100.0)
+    result_q.put(
+        OpenVocabResult(
+            request_id="req1", camera_name="cam1", object_id="frame-100.0",
+            matches=[OpenVocabMatch(query_id="q1", query_text="animals", score=0.3, box=(0.0, 0.0, 10.0, 10.0))],
+        )
+    )
+    dispatcher._drain_results()
+    first_id = next(iter(dispatcher.synthetic_tracked_objects("cam1", now=100.0)))
+
+    # Second call: box shifted by 1 unit -- still heavily overlapping (high IoU).
+    dispatcher._pending["req2"] = ("cam1", "frame-105.0", 105.0)
+    result_q.put(
+        OpenVocabResult(
+            request_id="req2", camera_name="cam1", object_id="frame-105.0",
+            matches=[OpenVocabMatch(query_id="q1", query_text="animals", score=0.5, box=(1.0, 1.0, 11.0, 11.0))],
+        )
+    )
+    dispatcher._drain_results()
+
+    live = dispatcher.synthetic_tracked_objects("cam1", now=105.0)
+    assert len(live) == 1
+    assert next(iter(live)) == first_id
+
+
+def test_new_instance_appearing_alongside_an_existing_live_track_gets_its_own_id(db, frame_manager):
+    """A second, spatially distinct animal appearing on a LATER OWLv2 call (not in the
+    same batch as the first) must still become an independent track alongside the
+    still-live first one -- not replace it, and not get merged into it.
+    """
+    request_q, result_q = FakeQueue(), FakeQueue()
+    dispatcher = OpenVocabDispatcher(request_q, result_q, frame_manager)
+
+    dispatcher._pending["req1"] = ("cam1", "frame-100.0", 100.0)
+    result_q.put(
+        OpenVocabResult(
+            request_id="req1", camera_name="cam1", object_id="frame-100.0",
+            matches=[OpenVocabMatch(query_id="q1", query_text="animals", score=0.3, box=(0.0, 0.0, 10.0, 10.0))],
+        )
+    )
+    dispatcher._drain_results()
+    first_id = next(iter(dispatcher.synthetic_tracked_objects("cam1", now=100.0)))
+
+    dispatcher._pending["req2"] = ("cam1", "frame-105.0", 105.0)
+    result_q.put(
+        OpenVocabResult(
+            request_id="req2", camera_name="cam1", object_id="frame-105.0",
+            matches=[OpenVocabMatch(query_id="q1", query_text="animals", score=0.4, box=(300.0, 300.0, 310.0, 310.0))],
+        )
+    )
+    dispatcher._drain_results()
+
+    live = dispatcher.synthetic_tracked_objects("cam1", now=105.0)
+    assert len(live) == 2
+    assert first_id in live
+
+
+def test_stale_expired_track_is_not_matched_against_for_new_association(db, frame_manager):
+    """An expired (past TTL) track must not "steal" a new match via IoU just because
+    it's spatially close -- it should be treated as if it doesn't exist, so the new
+    match becomes its own fresh track (with a NEW object_id, correctly starting a new
+    Event rather than reanimating one that already logically ended).
+    """
+    request_q, result_q = FakeQueue(), FakeQueue()
+    dispatcher = OpenVocabDispatcher(request_q, result_q, frame_manager)
+
+    dispatcher._pending["req1"] = ("cam1", "frame-100.0", 100.0)
+    result_q.put(
+        OpenVocabResult(
+            request_id="req1", camera_name="cam1", object_id="frame-100.0",
+            matches=[OpenVocabMatch(query_id="q1", query_text="animals", score=0.3, box=(0.0, 0.0, 10.0, 10.0))],
+        )
+    )
+    dispatcher._drain_results()
+    first_id = next(iter(dispatcher.synthetic_tracked_objects("cam1", now=100.0)))
+
+    # Way past SYNTHETIC_TRACK_TTL_SECONDS (20s) -- the first track is now expired.
+    later_time = 100.0 + 100.0
+    dispatcher._pending["req2"] = ("cam1", f"frame-{later_time}", later_time)
+    result_q.put(
+        OpenVocabResult(
+            request_id="req2", camera_name="cam1", object_id=f"frame-{later_time}",
+            # Same box position as the expired track -- would be a perfect IoU match if
+            # the expired track were wrongly still considered a live candidate.
+            matches=[OpenVocabMatch(query_id="q1", query_text="animals", score=0.5, box=(0.0, 0.0, 10.0, 10.0))],
+        )
+    )
+    dispatcher._drain_results()
+
+    live = dispatcher.synthetic_tracked_objects("cam1", now=later_time)
+    assert len(live) == 1
+    new_id = next(iter(live))
+    assert new_id != first_id  # a genuinely NEW track, not the old (expired) one reanimated
+
+
+def test_synthetic_tracks_are_scoped_per_camera(db, frame_manager):
+    request_q, result_q = FakeQueue(), FakeQueue()
+    dispatcher = OpenVocabDispatcher(request_q, result_q, frame_manager)
+    dispatcher._pending["req1"] = ("cam1", "frame-100.0", 100.0)
+    result_q.put(
+        OpenVocabResult(
+            request_id="req1", camera_name="cam1", object_id="frame-100.0",
+            matches=[OpenVocabMatch(query_id="q1", query_text="animals", score=0.3, box=(0.0, 0.0, 10.0, 10.0))],
+        )
+    )
+    dispatcher._drain_results()
+
+    assert dispatcher.synthetic_tracked_objects("cam2", now=100.0) == {}
+    assert len(dispatcher.synthetic_tracked_objects("cam1", now=100.0)) == 1
+
+
+# --------------------------------------------------------------------------------------
+# frame_jpeg propagation (TODO_FIX_LIST.md item 9/11) -- direct-frame-mode matches echo
+# their whole-frame crop_jpeg back through to synthetic_frame_jpegs() so EventProcessor
+# can give the resulting Event a real snapshot with a real box, instead of the
+# no-shared-frame fallback (no boxes at all) it used before this was built.
+# --------------------------------------------------------------------------------------
+
+
+def test_direct_frame_mode_match_frame_jpeg_is_available_via_synthetic_frame_jpegs(db, frame_manager):
+    request_q, result_q = FakeQueue(), FakeQueue()
+    dispatcher = OpenVocabDispatcher(request_q, result_q, frame_manager)
+    dispatcher._pending["req1"] = ("cam1", "frame-100.0", 100.0)
+
+    result_q.put(
+        OpenVocabResult(
+            request_id="req1", camera_name="cam1", object_id="frame-100.0",
+            matches=[OpenVocabMatch(query_id="q1", query_text="animals", score=0.42, box=(5.0, 10.0, 30.0, 40.0))],
+            crop_jpeg=b"fake-whole-frame-jpeg-bytes",
+        )
+    )
+    dispatcher._drain_results()
+
+    live = dispatcher.synthetic_tracked_objects("cam1", now=100.5)
+    assert len(live) == 1
+    object_id = next(iter(live))
+
+    frame_jpegs = dispatcher.synthetic_frame_jpegs("cam1")
+    assert frame_jpegs == {object_id: b"fake-whole-frame-jpeg-bytes"}
+
+
+def test_confirmed_object_mode_match_does_not_populate_synthetic_frame_jpegs(db, frame_manager):
+    """Confirmed-object mode's object_id is the real closed-vocab tracker's id (no
+    "frame-" prefix), and its crop_jpeg is a small object CROP, not a whole frame --
+    using it as a snapshot background would be wrong, so it must be excluded here.
+    """
+    request_q, result_q = FakeQueue(), FakeQueue()
+    dispatcher = OpenVocabDispatcher(request_q, result_q, frame_manager)
+    dispatcher._pending["req1"] = ("cam1", "real-tracker-obj-42", 100.0)
+
+    result_q.put(
+        OpenVocabResult(
+            request_id="req1", camera_name="cam1", object_id="real-tracker-obj-42",
+            matches=[OpenVocabMatch(query_id="q1", query_text="a red backpack", score=0.42, box=(5.0, 10.0, 30.0, 40.0))],
+            crop_jpeg=b"fake-small-crop-jpeg-bytes",
+        )
+    )
+    dispatcher._drain_results()
+
+    assert dispatcher.synthetic_tracked_objects("cam1", now=100.5)  # the track itself is still real
+    assert dispatcher.synthetic_frame_jpegs("cam1") == {}
+
+
+def test_synthetic_frame_jpeg_updates_when_an_existing_track_is_matched_again(db, frame_manager):
+    """An overlapping later match updates the SAME synthetic track in place (see
+    test_overlapping_match_for_same_query_updates_existing_track_not_a_new_one) -- its
+    frame_jpeg must update too, so a later Event write reflects the MOST RECENT
+    sighting's frame, not a stale first one.
+    """
+    request_q, result_q = FakeQueue(), FakeQueue()
+    dispatcher = OpenVocabDispatcher(request_q, result_q, frame_manager)
+
+    dispatcher._pending["req1"] = ("cam1", "frame-100.0", 100.0)
+    result_q.put(
+        OpenVocabResult(
+            request_id="req1", camera_name="cam1", object_id="frame-100.0",
+            matches=[OpenVocabMatch(query_id="q1", query_text="animals", score=0.3, box=(0.0, 0.0, 10.0, 10.0))],
+            crop_jpeg=b"first-frame",
+        )
+    )
+    dispatcher._drain_results()
+    first_id = next(iter(dispatcher.synthetic_tracked_objects("cam1", now=100.0)))
+    assert dispatcher.synthetic_frame_jpegs("cam1") == {first_id: b"first-frame"}
+
+    dispatcher._pending["req2"] = ("cam1", "frame-105.0", 105.0)
+    result_q.put(
+        OpenVocabResult(
+            request_id="req2", camera_name="cam1", object_id="frame-105.0",
+            # Overlapping box -> same track, per SYNTHETIC_TRACK_MATCH_IOU_THRESHOLD.
+            matches=[OpenVocabMatch(query_id="q1", query_text="animals", score=0.5, box=(0.0, 0.0, 12.0, 12.0))],
+            crop_jpeg=b"second-frame",
+        )
+    )
+    dispatcher._drain_results()
+    second_id = next(iter(dispatcher.synthetic_tracked_objects("cam1", now=105.0)))
+
+    assert second_id == first_id  # same track, updated in place
+    assert dispatcher.synthetic_frame_jpegs("cam1") == {first_id: b"second-frame"}
+
+
+def test_synthetic_frame_jpegs_excludes_expired_tracks(db, frame_manager):
+    request_q, result_q = FakeQueue(), FakeQueue()
+    dispatcher = OpenVocabDispatcher(request_q, result_q, frame_manager)
+    dispatcher._pending["req1"] = ("cam1", "frame-100.0", 100.0)
+    result_q.put(
+        OpenVocabResult(
+            request_id="req1", camera_name="cam1", object_id="frame-100.0",
+            matches=[OpenVocabMatch(query_id="q1", query_text="animals", score=0.3, box=(0.0, 0.0, 10.0, 10.0))],
+            crop_jpeg=b"stale-frame",
+        )
+    )
+    dispatcher._drain_results()
+
+    # Past SYNTHETIC_TRACK_TTL_SECONDS -- synthetic_tracked_objects() prunes it, and
+    # synthetic_frame_jpegs() must be called AFTER that pruning (see its own docstring)
+    # to correctly reflect the same live set, not a stale one.
+    later_time = 100.0 + 100.0
+    assert dispatcher.synthetic_tracked_objects("cam1", now=later_time) == {}
+    assert dispatcher.synthetic_frame_jpegs("cam1") == {}

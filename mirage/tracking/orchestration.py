@@ -108,7 +108,7 @@ class CameraOrchestrator:
                     continue  # entirely outside frame bounds after clamping
 
                 filter_config = self.camera.objects.filter_for(label)
-                if label not in self.camera.objects.track:
+                if not self.camera.objects.track_all and label not in self.camera.objects.track:
                     continue
                 if is_object_filtered(label, score, (x1, y1, x2, y2), frame_shape, filter_config):
                     continue
@@ -148,10 +148,20 @@ class CameraOrchestrator:
             # TrackedObjectState.is_false_positive's docstring).
             state.is_false_positive = lifecycle.is_false_positive
 
-        # Close out lifecycles for objects the tracker no longer reports.
+        # Evict lifecycles for objects the tracker no longer reports. Object ids are
+        # never reused (see tracker.py's _new_id, timestamp-based), so once a track
+        # ends there's no future frame that could still reference this obj_id -- and
+        # nothing reads a lifecycle after its track ends (get_lifecycle has no
+        # remaining callers; TrackedObjectState.is_false_positive is the only thing
+        # that ever left this process, mirrored while the track was still live, see
+        # its own docstring). Deleting outright here (rather than the old behavior of
+        # just setting end_time and leaving the entry in place forever) fixes a real
+        # unbounded-memory leak: every distinct object a busy camera has EVER tracked
+        # used to accumulate a permanent dict entry for the lifetime of this
+        # CameraTracker process, which does not restart on its own.
         for obj_id in list(self._lifecycles.keys()):
             if obj_id not in tracked:
-                self._lifecycles[obj_id].end_time = frame_time
+                del self._lifecycles[obj_id]
 
     def get_lifecycle(self, obj_id: str) -> ObjectLifecycle | None:
         return self._lifecycles.get(obj_id)

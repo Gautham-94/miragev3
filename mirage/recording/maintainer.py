@@ -22,6 +22,7 @@ from mirage.db.models import Recordings
 from mirage.recording.retention import SegmentActivityStats, should_retain_by_base_policy
 from mirage.recording.segments import (
     CacheSegment,
+    ffmpeg_open_file_paths,
     is_open_by_ffmpeg,
     is_valid_segment_duration,
     list_cache_segments,
@@ -63,8 +64,14 @@ class RecordingMaintainer:
     def run_once(self) -> None:
         segments = list_cache_segments(self.cache_dir)
         self._enforce_cache_backpressure(segments)
+        # Computed ONCE per cycle (not once per segment) -- see
+        # ffmpeg_open_file_paths's own docstring for why re-scanning the whole host
+        # process table per segment was real, measurable duplicated work whenever
+        # multiple segments are pending in the same pass (OPTIMIZATION_OPPORTUNITIES.md
+        # item 3).
+        open_paths = ffmpeg_open_file_paths()
         for segment in segments:
-            self._process_segment(segment)
+            self._process_segment(segment, open_paths)
 
     def _enforce_cache_backpressure(self, segments: list[CacheSegment]) -> None:
         """Section 8.1 point 4: if more than MAX_SEGMENTS_IN_CACHE unprocessed segments
@@ -84,13 +91,13 @@ class RecordingMaintainer:
                 s.path.unlink(missing_ok=True)
                 segments.remove(s)
 
-    def _process_segment(self, segment: CacheSegment) -> None:
+    def _process_segment(self, segment: CacheSegment, open_paths: set[str]) -> None:
         camera_config = self.cameras.get(segment.camera)
         if camera_config is None or not camera_config.enabled:
             segment.path.unlink(missing_ok=True)
             return
 
-        if is_open_by_ffmpeg(segment.path):
+        if is_open_by_ffmpeg(segment.path, open_paths):
             return  # still being written -- leave it for a later pass, don't touch it
 
         duration = probe_duration(segment.path)

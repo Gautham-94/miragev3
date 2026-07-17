@@ -158,6 +158,95 @@ def test_orchestrator_produces_tracked_objects_from_real_photo_sequence(short_ip
         proxy.close()
 
 
+def test_lifecycle_entries_are_evicted_once_a_track_ends():
+    """Regression test for a real unbounded-memory leak (see
+    OPTIMIZATION_OPPORTUNITIES.md item 2): CameraOrchestrator._lifecycles used to only
+    ever mark a closed-out track's ObjectLifecycle with end_time, never actually remove
+    it from the dict -- every distinct object id a busy camera ever saw accumulated a
+    permanent entry for the life of the (long-running, not-expected-to-restart)
+    CameraTracker process. Object ids are never reused (tracker.py's _new_id is
+    timestamp-based), so once a track ends there's no future frame that could still
+    reference it -- eviction is safe with no grace period needed.
+    """
+    from mirage.tracking.stationary import StationaryClassifier
+
+    yuv_frame, frame_shape = _load_bus_as_yuv_frame()
+    height, width = frame_shape
+
+    camera = CameraConfig(
+        name="leak_test_cam",
+        ffmpeg=FfmpegConfig(inputs=[CameraInputConfig(path="rtsp://x/y")]),
+        detect=DetectConfig(width=width, height=height, fps=5),
+        record=RecordConfig(enabled=False),
+    )
+    motion_detector = MotionDetector(frame_shape=frame_shape, config=camera.motion)
+    object_tracker = ObjectTracker(fps=camera.detect.fps)
+
+    class _UnusedDetector:
+        model_config = ModelConfig(width=320, height=320)
+
+    orchestrator = CameraOrchestrator(camera, motion_detector, object_tracker, _UnusedDetector())
+
+    def _state(obj_id: str, frame_time: float) -> "object":
+        from mirage.tracking.tracker import TrackedObjectState
+
+        return TrackedObjectState(
+            id=obj_id, label="person", box=(0, 0, 10, 10), score=0.9,
+            stationary=StationaryClassifier(threshold_frames=50), frame_time=frame_time,
+        )
+
+    # Frame 1: obj1 is present -- a lifecycle entry is created for it.
+    orchestrator._update_lifecycles({"obj1": _state("obj1", 1.0)}, frame_time=1.0)
+    assert "obj1" in orchestrator._lifecycles
+
+    # Frame 2: obj1 has disappeared (tracker no longer reports it) -- its lifecycle
+    # entry must be EVICTED, not just marked with end_time and left in the dict.
+    orchestrator._update_lifecycles({}, frame_time=2.0)
+    assert "obj1" not in orchestrator._lifecycles
+    assert orchestrator._lifecycles == {}
+
+
+def test_lifecycles_dict_does_not_grow_across_many_distinct_short_lived_objects():
+    """Simulates a busy camera where many distinct objects pass through one at a time
+    (a fresh id each time, as real tracked objects do) -- the dict must stay bounded by
+    however many objects are CURRENTLY tracked, not accumulate one entry per object
+    ever seen.
+    """
+    from mirage.tracking.stationary import StationaryClassifier
+    from mirage.tracking.tracker import TrackedObjectState
+
+    yuv_frame, frame_shape = _load_bus_as_yuv_frame()
+    height, width = frame_shape
+
+    camera = CameraConfig(
+        name="leak_test_cam2",
+        ffmpeg=FfmpegConfig(inputs=[CameraInputConfig(path="rtsp://x/y")]),
+        detect=DetectConfig(width=width, height=height, fps=5),
+        record=RecordConfig(enabled=False),
+    )
+    motion_detector = MotionDetector(frame_shape=frame_shape, config=camera.motion)
+    object_tracker = ObjectTracker(fps=camera.detect.fps)
+
+    class _UnusedDetector:
+        model_config = ModelConfig(width=320, height=320)
+
+    orchestrator = CameraOrchestrator(camera, motion_detector, object_tracker, _UnusedDetector())
+
+    for i in range(500):
+        obj_id = f"obj{i}"
+        state = TrackedObjectState(
+            id=obj_id, label="person", box=(0, 0, 10, 10), score=0.9,
+            stationary=StationaryClassifier(threshold_frames=50), frame_time=float(i),
+        )
+        orchestrator._update_lifecycles({obj_id: state}, frame_time=float(i))  # appears
+        orchestrator._update_lifecycles({}, frame_time=float(i) + 0.5)  # disappears
+
+    assert len(orchestrator._lifecycles) == 0, (
+        f"expected zero surviving lifecycle entries after 500 objects passed through, "
+        f"got {len(orchestrator._lifecycles)} -- indicates the leak has regressed"
+    )
+
+
 def test_orchestrator_with_detection_disabled_still_ages_tracks():
     """Section 7: if detection is disabled, the tracker still runs (with zero new
     detections) so existing tracks age out correctly -- validated here without needing
@@ -188,3 +277,109 @@ def test_orchestrator_with_detection_disabled_still_ages_tracks():
     result = orchestrator.process_frame(yuv_frame, frame_time=0.0)
     assert result.tracked_objects == {}
     assert result.regions == []
+
+
+class _FakeDetector:
+    """Stands in for RemoteObjectDetector: returns a FIXED set of detections every
+    call, regardless of the real frame content, so the label-filtering gate in
+    orchestration.py can be tested in isolation without the real ONNX model process.
+    """
+
+    model_config = ModelConfig(width=320, height=320)
+
+    def __init__(self, detections: list[tuple[str, float, tuple]]) -> None:
+        self._detections = detections
+
+    def detect(self, *args, **kwargs) -> list[tuple[str, float, tuple]]:
+        return self._detections
+
+
+def _drive_frames(orchestrator: CameraOrchestrator, yuv_frame, count: int = 6):
+    """Feeds the same frame repeatedly, matching the real integration test's own
+    pattern -- enough frames for norfair's initialization_delay to confirm a track.
+    """
+    result = None
+    for i in range(count):
+        result = orchestrator.process_frame(yuv_frame, frame_time=float(i))
+    return result
+
+
+def test_track_all_tracks_a_label_not_in_the_track_list():
+    """ObjectsConfig.track_all=True bypasses the `label not in camera.objects.track`
+    gate entirely -- a detector-emitted label that was never typed into Track objects
+    (here, "dog", with only "person" configured) must still be tracked.
+    """
+    yuv_frame, frame_shape = _load_bus_as_yuv_frame()
+    height, width = frame_shape
+
+    camera = CameraConfig(
+        name="track_all_cam",
+        ffmpeg=FfmpegConfig(inputs=[CameraInputConfig(path="rtsp://x/y")]),
+        detect=DetectConfig(width=width, height=height, fps=5),
+        record=RecordConfig(enabled=False),
+        objects=ObjectsConfig(track=["person"], track_all=True),
+    )
+    motion_detector = MotionDetector(frame_shape=frame_shape, config=camera.motion)
+    object_tracker = ObjectTracker(fps=camera.detect.fps)
+    # A normalized box comfortably inside the frame, in (y1, x1, y2, x2) order.
+    detector = _FakeDetector([("dog", 0.9, (0.1, 0.1, 0.4, 0.4))])
+    orchestrator = CameraOrchestrator(camera, motion_detector, object_tracker, detector)
+
+    final = _drive_frames(orchestrator, yuv_frame)
+
+    tracked_labels = {state.label for state in final.tracked_objects.values()}
+    assert "dog" in tracked_labels, f"expected 'dog' to be tracked with track_all=True, got {tracked_labels}"
+
+
+def test_track_all_false_still_filters_by_the_track_list():
+    """The default (track_all=False) behavior is unchanged: a label not in Track
+    objects is still silently discarded, same as before this feature existed.
+    """
+    yuv_frame, frame_shape = _load_bus_as_yuv_frame()
+    height, width = frame_shape
+
+    camera = CameraConfig(
+        name="track_filtered_cam",
+        ffmpeg=FfmpegConfig(inputs=[CameraInputConfig(path="rtsp://x/y")]),
+        detect=DetectConfig(width=width, height=height, fps=5),
+        record=RecordConfig(enabled=False),
+        objects=ObjectsConfig(track=["person"], track_all=False),
+    )
+    motion_detector = MotionDetector(frame_shape=frame_shape, config=camera.motion)
+    object_tracker = ObjectTracker(fps=camera.detect.fps)
+    detector = _FakeDetector([("dog", 0.9, (0.1, 0.1, 0.4, 0.4))])
+    orchestrator = CameraOrchestrator(camera, motion_detector, object_tracker, detector)
+
+    final = _drive_frames(orchestrator, yuv_frame)
+
+    assert final.tracked_objects == {}, "a label outside Track objects must still be filtered when track_all=False"
+
+
+def test_track_all_does_not_bypass_the_object_filter_thresholds():
+    """track_all only bypasses the LABEL membership check -- ObjectFilterConfig's own
+    score/area thresholds (is_object_filtered) still apply to every label exactly as
+    before, so track_all=True doesn't also disable existing noise filtering.
+    """
+    from mirage.config.schema import ObjectFilterConfig
+
+    yuv_frame, frame_shape = _load_bus_as_yuv_frame()
+    height, width = frame_shape
+
+    camera = CameraConfig(
+        name="track_all_filtered_cam",
+        ffmpeg=FfmpegConfig(inputs=[CameraInputConfig(path="rtsp://x/y")]),
+        detect=DetectConfig(width=width, height=height, fps=5),
+        record=RecordConfig(enabled=False),
+        objects=ObjectsConfig(
+            track=["person"], track_all=True,
+            filters={"dog": ObjectFilterConfig(min_score=0.99)},  # this detection's score (0.5) will never pass
+        ),
+    )
+    motion_detector = MotionDetector(frame_shape=frame_shape, config=camera.motion)
+    object_tracker = ObjectTracker(fps=camera.detect.fps)
+    detector = _FakeDetector([("dog", 0.5, (0.1, 0.1, 0.4, 0.4))])
+    orchestrator = CameraOrchestrator(camera, motion_detector, object_tracker, detector)
+
+    final = _drive_frames(orchestrator, yuv_frame)
+
+    assert final.tracked_objects == {}, "the existing min_score filter must still apply even with track_all=True"

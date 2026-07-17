@@ -44,12 +44,25 @@ class PendingReviewSegment:
     objects: set[str] = field(default_factory=set)  # labels
     zones: set[str] = field(default_factory=set)
     thumb_path: str | None = None
+    # obj_id -> (label, [x1, y1, x2, y2] normalized 0-1) -- captured ONCE, at the exact
+    # moment the thumbnail itself was captured (in _start_segment, from that same
+    # process() call's tracked_objects), never updated afterward. This is deliberate:
+    # the thumbnail is a single go2rtc snapshot taken at segment-start and never
+    # refreshed, so a box drawn from a LATER frame's state.box would show the object in
+    # a position it had already moved away from by the time this frame was captured
+    # -- normalized (not raw pixel) coordinates so the frontend can scale them onto
+    # the thumbnail's actual rendered size regardless of the snapshot's real resolution,
+    # which can differ from camera.frame_shape's detect-resolution box coordinate space.
+    thumb_boxes: dict[str, tuple[str, list[float]]] = field(default_factory=dict)
 
     def data(self) -> dict:
         return {
             "detections": list(self.detections.keys()),
             "objects": sorted(self.objects),
             "zones": sorted(self.zones),
+            "thumb_boxes": {
+                obj_id: {"label": label, "box": box} for obj_id, (label, box) in self.thumb_boxes.items()
+            },
         }
 
 
@@ -76,6 +89,32 @@ def qualifies_for_review(state: TrackedObjectState) -> bool:
     return True
 
 
+def _normalized_boxes_at_thumb_time(
+    camera: CameraConfig, tracked_objects: dict[str, TrackedObjectState]
+) -> dict[str, tuple[str, list[float]]]:
+    """Snapshots each REVIEW-QUALIFYING object's current box, normalized to [0, 1] by
+    camera.frame_shape (the detect-resolution coordinate space state.box is already
+    expressed in) -- called exactly once, from _start_segment, at the same instant the
+    segment's thumbnail itself is captured. Normalized rather than raw pixel coordinates
+    specifically because the thumbnail is a go2rtc live snapshot, not a frame decoded at
+    detect resolution -- its actual JPEG dimensions can differ from frame_shape, so the
+    frontend needs a resolution-independent box to scale onto whatever size it actually
+    renders the thumbnail at. Uses the SAME qualifies_for_review/classify_severity gate
+    as process()'s own `contributing` filter, so a stationary or non-alert-worthy object
+    in frame doesn't get a box drawn on it too.
+    """
+    height, width = camera.frame_shape
+    boxes: dict[str, tuple[str, list[float]]] = {}
+    for obj_id, state in tracked_objects.items():
+        if not qualifies_for_review(state):
+            continue
+        if classify_severity(state.label, camera) is None:
+            continue
+        x1, y1, x2, y2 = state.box
+        boxes[obj_id] = (state.label, [x1 / width, y1 / height, x2 / width, y2 / height])
+    return boxes
+
+
 class ReviewSegmentMaintainer:
     def __init__(
         self,
@@ -93,7 +132,15 @@ class ReviewSegmentMaintainer:
         camera: CameraConfig,
         frame_time: float,
         tracked_objects: dict[str, TrackedObjectState],
+        frame_jpeg: bytes | None = None,
     ) -> None:
+        # frame_jpeg (the exact detected frame, see
+        # mirage.tracking.camera_tracker._maybe_encode_frame) is accepted for call-site
+        # symmetry with EventProcessor.process, which DOES use it (see
+        # mirage.events.processor's write_boxed_snapshot fix) -- ReviewSegmentMaintainer
+        # itself still uses the older live-go2rtc-fetch thumbnail path unchanged
+        # (capture_thumbnail below), since Review-page boxes are intentionally not
+        # shown at all right now (user request).
         pending = self._pending.get(camera.name)
 
         contributing: list[tuple[str, str, Severity]] = []  # (obj_id, label, severity)
@@ -109,7 +156,7 @@ class ReviewSegmentMaintainer:
             highest_severity = Severity.alert if any(s == Severity.alert for _, _, s in contributing) else Severity.detection
 
             if pending is None:
-                pending = self._start_segment(camera, frame_time, highest_severity)
+                pending = self._start_segment(camera, frame_time, highest_severity, tracked_objects)
             elif highest_severity == Severity.alert and pending.severity == Severity.detection:
                 self._upgrade_segment(pending, frame_time)
 
@@ -124,12 +171,19 @@ class ReviewSegmentMaintainer:
             if elapsed >= self.cutoff_seconds:
                 self._end_segment(pending, frame_time)
 
-    def _start_segment(self, camera: CameraConfig, frame_time: float, severity: Severity) -> PendingReviewSegment:
+    def _start_segment(
+        self,
+        camera: CameraConfig,
+        frame_time: float,
+        severity: Severity,
+        tracked_objects: dict[str, TrackedObjectState],
+    ) -> PendingReviewSegment:
         segment = PendingReviewSegment(
             id=_segment_id(frame_time), camera=camera.name, severity=severity,
             start_time=frame_time, last_activity_time=frame_time,
         )
         segment.thumb_path = capture_thumbnail(self.thumbnail_fetcher, self.thumb_dir, segment.id, camera.name)
+        segment.thumb_boxes = _normalized_boxes_at_thumb_time(camera, tracked_objects)
         self._pending[camera.name] = segment
         logger.debug("%s: review segment %s started (%s)", camera.name, segment.id, severity)
         return segment

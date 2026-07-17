@@ -163,6 +163,32 @@ input[type='text'] {
   font-weight: 600;
   font-size: var(--text-base);
   color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.source-tag {
+  font-size: var(--text-xs);
+  font-weight: 500;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-radius: var(--radius-sm);
+  padding: 2px 7px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.auto-hint {
+  font-size: var(--text-sm);
+  color: var(--text-tertiary);
+  flex: none;
+  white-space: nowrap;
+
+  a {
+    color: var(--accent);
+  }
 }
 
 .query-meta {

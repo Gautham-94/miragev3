@@ -1,5 +1,6 @@
 import { Component, OnInit, computed, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
+import { RouterLink } from '@angular/router';
 
 import { ApiService } from '../../core/services/api.service';
 import { CameraConfigDetail, Query, QueryMatch } from '../../core/models/api.models';
@@ -9,7 +10,7 @@ import { Lightbox } from '../../shared/lightbox/lightbox';
 @Component({
   selector: 'app-queries-page',
   standalone: true,
-  imports: [FormsModule, Icon, Lightbox],
+  imports: [FormsModule, RouterLink, Icon, Lightbox],
   templateUrl: './queries-page.html',
   styleUrl: './queries-page.scss',
 })
@@ -73,6 +74,14 @@ export class QueriesPage implements OnInit {
 
   protected queryTextFor(queryId: string): string {
     return this.queries().find((q) => q.id === queryId)?.text ?? '(deleted query)';
+  }
+
+  // Auto-provisioned (source="track_objects") queries are always scoped to exactly one
+  // camera by _sync_track_object_queries (mirage/api/routers/config.py) -- this just
+  // gives the template a safe, typed accessor instead of an inline `[0] ?? '?'` guard
+  // against a case that can't actually happen for this source.
+  protected ownerCameraOf(query: Query): string {
+    return query.cameras[0] ?? '?';
   }
 
   protected formatTime(epochSeconds: number): string {

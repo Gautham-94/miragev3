@@ -12,18 +12,68 @@ import multiprocessing as mp
 import os
 import queue as queue_module
 
+import cv2
+
 from mirage.config.schema import CameraConfig, DetectorInstanceConfig
 from mirage.const import PROCESS_PRIORITY_HIGH
 from mirage.detection.labelmap import load_labels
 from mirage.detection.remote import RemoteObjectDetector
+from mirage.detection.tensor import yuv420_to_bgr
 from mirage.motion.detector import MotionDetector
 from mirage.tracking.orchestration import CameraOrchestrator
-from mirage.tracking.tracker import ObjectTracker
+from mirage.tracking.tracker import ObjectTracker, TrackedObjectState
 from mirage.util.shm import SharedMemoryFrameManager
 
 logger = logging.getLogger(__name__)
 
 FRAME_QUEUE_POLL_TIMEOUT_SECONDS = 1.0
+
+# JPEG quality for the plain (no box yet) full-frame snapshot passed alongside a
+# detected-frame result -- see _maybe_encode_frame's docstring for why this is only
+# encoded conditionally, not on every single frame.
+_SNAPSHOT_JPEG_QUALITY = 85
+
+
+def _has_qualifying_object(tracked_objects: dict[str, TrackedObjectState]) -> bool:
+    """Cheap proxy for "might EventProcessor/ReviewSegmentMaintainer want a snapshot
+    of this frame" -- the real qualification logic (label in alert/detection lists,
+    not stationary, etc, see mirage.events.review.qualifies_for_review/
+    classify_severity) lives in the main process and needs CameraConfig.review, which
+    this per-camera tracker process doesn't need to duplicate. Gate 1 alone
+    (is_false_positive is False) is a cheap, correct OVER-approximation: every object
+    that would actually qualify for a snapshot must have passed Gate 1 first, so
+    checking Gate 1 here can only cause some unnecessary encodes (an ongoing event's
+    later frames, or a confirmed object whose label isn't alert/detection-worthy) --
+    never a missed one.
+    """
+    return any(not state.is_false_positive for state in tracked_objects.values())
+
+
+def _maybe_encode_frame(yuv_frame, frame_shape: tuple[int, int], tracked_objects: dict[str, TrackedObjectState]) -> bytes | None:
+    """Encodes a plain (no box burned in yet -- that happens later, once
+    EventProcessor/ReviewSegmentMaintainer actually decide a snapshot is needed, see
+    their own _on_start/_start_segment) full-frame JPEG from the SAME SHM frame this
+    tracker just ran detection on -- MUST happen here, synchronously, while the frame
+    is still live: mirage.util.shm's ring buffer is finite-depth and this same slot
+    will be reused by a newer frame shortly after camera_tracker_main's own
+    frame_manager.close() call below, so any later, deferred attempt to re-fetch "the
+    frame this detection came from" (e.g. a live go2rtc call, as EventProcessor used
+    to do) can easily end up describing a DIFFERENT, later moment than when
+    state.box was actually computed -- a real bug this fixes (a moving person's box
+    landing nowhere near their actual position in the mismatched snapshot).
+
+    Only encodes at all if _has_qualifying_object is True, to avoid the real
+    (measured -- JPEG-encoding a 640x480 frame is not free) cost of encoding on every
+    single frame at 5-10fps/camera when the overwhelming majority of frames have no
+    activity EventProcessor/ReviewSegmentMaintainer would ever want a snapshot for.
+    """
+    if not _has_qualifying_object(tracked_objects):
+        return None
+    bgr = yuv420_to_bgr(yuv_frame, frame_shape)
+    ok, encoded = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, _SNAPSHOT_JPEG_QUALITY])
+    if not ok:
+        return None
+    return encoded.tobytes()
 
 
 def camera_tracker_main(
@@ -83,11 +133,18 @@ def camera_tracker_main(
             frame_manager.close(frame_name)
             continue
 
+        # MUST happen before frame_manager.close() -- see _maybe_encode_frame's
+        # docstring for why this can't be deferred to the main process.
+        frame_jpeg = _maybe_encode_frame(yuv_frame, camera.frame_shape, result.tracked_objects)
+
         frame_manager.close(frame_name)
 
         try:
             detected_frames_queue.put(
-                (camera.name, frame_name, frame_time, result.tracked_objects, result.motion_boxes, result.regions),
+                (
+                    camera.name, frame_name, frame_time, result.tracked_objects,
+                    result.motion_boxes, result.regions, frame_jpeg,
+                ),
                 block=False,
             )
         except queue_module.Full:

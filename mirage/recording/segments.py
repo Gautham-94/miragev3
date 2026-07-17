@@ -55,7 +55,38 @@ def list_cache_segments(cache_dir: str) -> list[CacheSegment]:
     return segments
 
 
-def is_open_by_ffmpeg(path: Path) -> bool:
+def ffmpeg_open_file_paths() -> set[str]:
+    """Every file path currently open by any ffmpeg process on the host, in ONE pass
+    over the process table -- the expensive part of the "is this cache segment still
+    being written" check (see is_open_by_ffmpeg's docstring for why the check itself is
+    needed at all). Split out from is_open_by_ffmpeg so a caller checking MULTIPLE
+    segments in the same maintainer cycle (RecordingMaintainer.run_once, up to
+    MAX_SEGMENTS_IN_CACHE=6 segments PER CAMERA can be pending at once) only pays the
+    psutil.process_iter() + proc.open_files() syscall cost ONCE per cycle, not once per
+    segment -- confirmed as real, measurable duplicated work: the old per-call version
+    re-enumerated the ENTIRE host process table from scratch for every single pending
+    segment within the same 5-second maintainer pass (OPTIMIZATION_OPPORTUNITIES.md
+    item 3). No cheaper OS-level primitive gives the same guarantee without a false
+    negative -- confirmed directly: ffmpeg does not take an flock/fcntl lock on its
+    output file, so a lock-based "is this open" check would silently never detect an
+    in-progress segment, reintroducing the exact bug this whole check exists to
+    prevent (deleting a still-being-written file). Plumbing ffmpeg's own PID through
+    from CameraCapture (a separate process from where this runs) would be more
+    invasive for the same net effect.
+    """
+    open_paths: set[str] = set()
+    for proc in psutil.process_iter(["name"]):
+        try:
+            if proc.info["name"] not in ("ffmpeg", "ffmpeg.exe"):
+                continue
+            for f in proc.open_files():
+                open_paths.add(f.path)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+    return open_paths
+
+
+def is_open_by_ffmpeg(path: Path, open_paths: set[str] | None = None) -> bool:
     """Section 8.1 point 3: skip files still being actively written by ffmpeg, rather
     than treating them as corrupt/invalid just because they don't have a moov atom yet
     (a segment-muxer output file is only finalized -- gets its moov atom written -- once
@@ -67,18 +98,17 @@ def is_open_by_ffmpeg(path: Path) -> bool:
     real segment files through several maintainer poll cycles: files that were
     "invalid" (no moov atom) at t=10s became fully valid (complete, probeable duration)
     only ~5-10s later, once ffmpeg's next segment rollover flushed them.
+
+    `open_paths`: pass the result of ffmpeg_open_file_paths() to check against an
+    already-computed snapshot (the normal usage, once per maintainer cycle -- see that
+    function's own docstring) instead of re-scanning the whole process table for this
+    one path. Left optional (computed fresh if omitted) so this function stays usable
+    on its own, e.g. in tests or a one-off call.
     """
     resolved = str(path.resolve())
-    for proc in psutil.process_iter(["name"]):
-        try:
-            if proc.info["name"] not in ("ffmpeg", "ffmpeg.exe"):
-                continue
-            for f in proc.open_files():
-                if f.path == resolved:
-                    return True
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            continue
-    return False
+    if open_paths is None:
+        open_paths = ffmpeg_open_file_paths()
+    return resolved in open_paths
 
 
 def probe_duration(path: Path, ffprobe_path: str = "ffprobe") -> Optional[float]:

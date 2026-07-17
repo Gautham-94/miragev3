@@ -22,6 +22,7 @@ import {
   RecordingListParams,
   ReviewListParams,
   ReviewSegment,
+  SystemStatus,
 } from '../models/api.models';
 
 function toHttpParams(params: object): HttpParams {
@@ -41,6 +42,14 @@ export class ApiService {
 
   listCameras(): Observable<Camera[]> {
     return this.http.get<Camera[]>(`${this.base}/api/cameras`);
+  }
+
+  getSystemStatus(): Observable<SystemStatus> {
+    return this.http.get<SystemStatus>(`${this.base}/api/system/status`);
+  }
+
+  restartPipeline(): Observable<{ ok: boolean }> {
+    return this.http.post<{ ok: boolean }>(`${this.base}/api/system/restart`, {});
   }
 
   getCamera(name: string): Observable<Camera> {

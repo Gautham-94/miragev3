@@ -245,6 +245,82 @@ def test_data_payload_includes_contributing_objects_and_labels(db):
     assert "person" in row.data["objects"]
 
 
+# --------------------------------------------------------------------------------------
+# thumb_boxes -- captured ONCE, at the exact instant the segment's thumbnail itself is
+# taken (in _start_segment), so a box drawn on the Review page's thumbnail lines up with
+# where the object actually was in that frozen frame -- not wherever it later moved to.
+# --------------------------------------------------------------------------------------
+
+
+def test_thumb_boxes_captured_at_segment_start_normalized_to_frame_shape(db):
+    maintainer = ReviewSegmentMaintainer(cutoff_seconds=10)
+    camera = _camera()  # default DetectConfig: 640x480
+    state = _active_state("obj1", "person", frame_time=100.0)
+    state.box = (64.0, 36.0, 320.0, 180.0)  # (x1, y1, x2, y2) pixel coords
+
+    maintainer.process(camera, 100.0, {"obj1": state})
+
+    row = ReviewSegment.get(ReviewSegment.camera == "cam1")
+    assert "obj1" in row.data["thumb_boxes"]
+    entry = row.data["thumb_boxes"]["obj1"]
+    assert entry["label"] == "person"
+    # normalized against width=640, height=480
+    assert entry["box"] == pytest.approx([64.0 / 640, 36.0 / 480, 320.0 / 640, 180.0 / 480])
+
+
+def test_thumb_boxes_excludes_stationary_and_false_positive_objects(db):
+    maintainer = ReviewSegmentMaintainer(cutoff_seconds=10)
+    camera = _camera()
+    qualifying = _active_state("obj1", "person", frame_time=100.0)
+    non_qualifying = _stationary_state("obj2", "person", frame_time=100.0)
+
+    maintainer.process(camera, 100.0, {"obj1": qualifying, "obj2": non_qualifying})
+
+    row = ReviewSegment.get(ReviewSegment.camera == "cam1")
+    assert "obj1" in row.data["thumb_boxes"]
+    assert "obj2" not in row.data["thumb_boxes"]
+
+
+def test_thumb_boxes_excludes_non_review_labels(db):
+    """A tracked object whose label isn't in either alert_labels or detection_labels
+    doesn't qualify for review at all (classify_severity returns None) -- it must not
+    get a thumb_box either, even if some OTHER object in the same frame does qualify.
+    """
+    maintainer = ReviewSegmentMaintainer(cutoff_seconds=10)
+    camera = _camera()
+    person = _active_state("person1", "person", frame_time=100.0)
+    dog = _active_state("dog1", "dog", frame_time=100.0)  # "dog" is in neither label list
+
+    maintainer.process(camera, 100.0, {"person1": person, "dog1": dog})
+
+    row = ReviewSegment.get(ReviewSegment.camera == "cam1")
+    assert "person1" in row.data["thumb_boxes"]
+    assert "dog1" not in row.data["thumb_boxes"]
+
+
+def test_thumb_boxes_stay_frozen_from_segment_start_even_as_object_moves(db):
+    """The whole point of thumb_boxes: it must NOT be re-captured/updated on later
+    process() calls, since the thumbnail image itself is only ever taken once (at
+    segment start) -- a box that kept tracking the object's LATEST position would show
+    it somewhere it had already moved away from by the time that frozen frame was shot.
+    """
+    maintainer = ReviewSegmentMaintainer(cutoff_seconds=10)
+    camera = _camera()
+    state_at_start = _active_state("obj1", "person", frame_time=100.0)
+    state_at_start.box = (0.0, 0.0, 50.0, 50.0)
+
+    maintainer.process(camera, 100.0, {"obj1": state_at_start})
+    row = ReviewSegment.get(ReviewSegment.camera == "cam1")
+    original_box = row.data["thumb_boxes"]["obj1"]["box"]
+
+    state_later = _active_state("obj1", "person", frame_time=105.0)
+    state_later.box = (400.0, 200.0, 500.0, 300.0)  # object has moved a lot
+    maintainer.process(camera, 105.0, {"obj1": state_later})
+
+    row = ReviewSegment.get(ReviewSegment.camera == "cam1")
+    assert row.data["thumb_boxes"]["obj1"]["box"] == original_box
+
+
 def test_close_all_pending_force_closes_open_segments(db):
     maintainer = ReviewSegmentMaintainer(cutoff_seconds=10)
     camera = _camera()

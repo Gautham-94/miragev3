@@ -14,7 +14,6 @@ from typing import Optional
 
 import cv2
 import numpy as np
-from scipy.ndimage import gaussian_filter
 
 from mirage.config.schema import MotionConfig
 
@@ -105,7 +104,19 @@ class MotionDetector:
         # Mask AFTER contrast stretch (so masked pixels don't skew the percentile calc),
         # but BEFORE blur/diff (so they never contribute to the background model).
         resized_frame[self.mask] = 0
-        resized_frame = gaussian_filter(resized_frame, sigma=1, radius=self.blur_radius)
+        # cv2.GaussianBlur instead of scipy.ndimage.gaussian_filter (this function's
+        # only non-cv2 call, in an otherwise all-cv2 hot path run unconditionally on
+        # every frame of every camera) -- measured ~7x faster for this frame size
+        # (OPTIMIZATION_OPPORTUNITIES.md item 7). ksize = 2*radius+1 matches scipy's
+        # own kernel-size convention for an explicit `radius` argument.
+        # BORDER_REFLECT (not cv2's default BORDER_REFLECT_101) is required to match
+        # scipy's default 'reflect' edge handling -- confirmed by direct comparison:
+        # BORDER_REFLECT_101 diverges by up to 61/255 at the edges, BORDER_REFLECT by
+        # at most 2/255 everywhere (ordinary uint8 rounding, not a behavior change).
+        blur_ksize = 2 * self.blur_radius + 1
+        resized_frame = cv2.GaussianBlur(
+            resized_frame, (blur_ksize, blur_ksize), sigmaX=1, sigmaY=1, borderType=cv2.BORDER_REFLECT,
+        )
 
         frame_delta = cv2.absdiff(resized_frame, cv2.convertScaleAbs(self.avg_frame))
         thresh = cv2.threshold(frame_delta, self.config.threshold, 255, cv2.THRESH_BINARY)[1]

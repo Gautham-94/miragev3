@@ -7,7 +7,10 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from mirage.util.thumbnail import capture_thumbnail
+import cv2
+import numpy as np
+
+from mirage.util.thumbnail import capture_thumbnail, draw_boxes_on_jpeg_bytes, write_clean_snapshot
 
 
 def test_capture_thumbnail_writes_file_and_returns_path():
@@ -69,3 +72,127 @@ def test_capture_thumbnail_gives_up_after_two_failed_attempts():
 
         assert len(calls) == 2
         assert result is None
+
+
+# --------------------------------------------------------------------------------------
+# write_clean_snapshot -- writes a JPEG to disk completely unmodified. The saved file is
+# ALWAYS the clean, unannotated frame (mirrors Frigate's own confirmed design, see
+# mirage/util/thumbnail.py's module docstring) -- boxes are never burned in here.
+# --------------------------------------------------------------------------------------
+
+
+def _real_jpeg(width: int = 100, height: int = 80) -> bytes:
+    image = np.full((height, width, 3), 128, dtype=np.uint8)
+    ok, encoded = cv2.imencode(".jpg", image)
+    assert ok
+    return encoded.tobytes()
+
+
+def test_write_clean_snapshot_writes_the_exact_same_bytes(tmp_path):
+    frame_jpeg = _real_jpeg()
+    result = write_clean_snapshot(frame_jpeg, str(tmp_path), "ev1")
+
+    assert result == str(tmp_path / "ev1.jpg")
+    assert Path(result).read_bytes() == frame_jpeg  # byte-for-byte unmodified, no drawing
+
+
+def test_write_clean_snapshot_creates_missing_directory(tmp_path):
+    thumb_dir = tmp_path / "nested" / "dir"
+    result = write_clean_snapshot(_real_jpeg(), str(thumb_dir), "ev1")
+
+    assert result is not None
+    assert Path(result).exists()
+
+
+# --------------------------------------------------------------------------------------
+# draw_boxes_on_jpeg_bytes -- renders boxes on demand from already-in-memory bytes,
+# returning NEW bytes (never touches disk) -- called at HTTP-request time by
+# mirage/api/routers/events.py's snapshot endpoint, fixing a real bug: burning a box in
+# once at Event-creation time couldn't handle an open-vocab match, which is produced by
+# a completely separate process with no shared frame to burn into.
+# --------------------------------------------------------------------------------------
+
+
+def test_draw_boxes_on_jpeg_bytes_returns_a_real_decodable_image():
+    frame_jpeg = _real_jpeg()
+    result = draw_boxes_on_jpeg_bytes(frame_jpeg, [("person", (10.0, 10.0, 50.0, 60.0))])
+
+    assert result is not None
+    arr = np.frombuffer(result, dtype=np.uint8)
+    decoded = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    assert decoded is not None
+    assert decoded.shape[:2] == (80, 100)  # same dimensions as the source frame
+
+
+def test_draw_boxes_on_jpeg_bytes_does_not_mutate_the_input_bytes():
+    frame_jpeg = _real_jpeg()
+    original = bytes(frame_jpeg)
+    draw_boxes_on_jpeg_bytes(frame_jpeg, [("person", (10.0, 10.0, 50.0, 60.0))])
+
+    assert frame_jpeg == original  # operates on a decoded COPY, input bytes untouched
+
+
+def test_draw_boxes_on_jpeg_bytes_actually_draws_a_visible_box():
+    """Confirms the box is REALLY drawn into the pixels, not just re-encoded unchanged
+    -- picks a pixel exactly on the box's border (where cv2.rectangle draws) and checks
+    it differs from the plain gray background.
+    """
+    frame_jpeg = _real_jpeg(width=100, height=80)
+    result = draw_boxes_on_jpeg_bytes(frame_jpeg, [("person", (10.0, 10.0, 50.0, 60.0))])
+
+    arr = np.frombuffer(result, dtype=np.uint8)
+    decoded = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    border_pixel = decoded[10, 30]  # top edge of the box, well inside its width
+    background_pixel = decoded[70, 90]  # far corner, untouched by any box
+    assert not np.array_equal(border_pixel, background_pixel)
+
+
+def test_draw_boxes_on_jpeg_bytes_draws_multiple_boxes():
+    frame_jpeg = _real_jpeg(width=200, height=150)
+    boxes = [("person", (10.0, 10.0, 50.0, 60.0)), ("car", (100.0, 80.0, 180.0, 140.0))]
+    result = draw_boxes_on_jpeg_bytes(frame_jpeg, boxes)
+
+    arr = np.frombuffer(result, dtype=np.uint8)
+    decoded = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    box1_border = decoded[10, 30]
+    box2_border = decoded[80, 140]
+    background = decoded[0, 0]
+    assert not np.array_equal(box1_border, background)
+    assert not np.array_equal(box2_border, background)
+
+
+def test_draw_boxes_on_jpeg_bytes_clamps_out_of_bounds_box():
+    """A box partially or fully outside the frame (e.g. a norfair estimate that briefly
+    overshoots frame bounds) must not crash -- clamped to the frame.
+    """
+    frame_jpeg = _real_jpeg(width=100, height=80)
+    result = draw_boxes_on_jpeg_bytes(frame_jpeg, [("person", (-50.0, -50.0, 200.0, 200.0))])
+
+    assert result is not None
+    arr = np.frombuffer(result, dtype=np.uint8)
+    decoded = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    assert decoded.shape[:2] == (80, 100)
+
+
+def test_draw_boxes_on_jpeg_bytes_skips_degenerate_box_without_crashing():
+    frame_jpeg = _real_jpeg()
+    # x1 > x2 -- inverted/degenerate (a real symptom of the original box-timing bug --
+    # see TODO_FIX_LIST.md).
+    result = draw_boxes_on_jpeg_bytes(frame_jpeg, [("person", (200.0, 10.0, 50.0, 60.0))])
+
+    assert result is not None  # the frame itself is still returned, just without that box
+
+
+def test_draw_boxes_on_jpeg_bytes_with_no_boxes_returns_the_same_image():
+    frame_jpeg = _real_jpeg()
+    result = draw_boxes_on_jpeg_bytes(frame_jpeg, [])
+
+    assert result is not None
+    arr = np.frombuffer(result, dtype=np.uint8)
+    decoded = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    assert decoded.shape[:2] == (80, 100)
+
+
+def test_draw_boxes_on_jpeg_bytes_returns_none_for_invalid_jpeg():
+    result = draw_boxes_on_jpeg_bytes(b"not a real jpeg", [("person", (0.0, 0.0, 10.0, 10.0))])
+    assert result is None

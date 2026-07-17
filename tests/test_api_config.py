@@ -138,6 +138,66 @@ def test_update_camera_changes_persist(client):
     assert fetched.json()["fps"] == 15
 
 
+def test_create_camera_track_all_defaults_to_false(client):
+    resp = client.post(
+        "/api/config/cameras",
+        json={"name": "front_door", "rtsp_url": "rtsp://127.0.0.1/x", "detector": "general"},
+    )
+    assert resp.status_code == 201
+    assert resp.json()["camera"]["track_all"] is False
+
+    fetched = client.get("/api/cameras/front_door")
+    assert fetched.json()["track_all"] is False
+
+
+def test_create_camera_with_track_all_persists_and_is_readable(client):
+    resp = client.post(
+        "/api/config/cameras",
+        json={
+            "name": "front_door", "rtsp_url": "rtsp://127.0.0.1/x", "detector": "general",
+            "track_objects": ["person"], "track_all": True,
+        },
+    )
+    assert resp.status_code == 201
+    assert resp.json()["camera"]["track_all"] is True
+
+    fetched_summary = client.get("/api/cameras/front_door")
+    assert fetched_summary.json()["track_all"] is True
+
+    fetched_config = client.get("/api/config/cameras/front_door")
+    assert fetched_config.json()["track_all"] is True
+    # track_objects itself is untouched/still saved, even though track_all makes it
+    # irrelevant to the tracking gate -- so re-disabling track_all later doesn't lose it.
+    assert fetched_config.json()["track_objects"] == ["person"]
+
+
+def test_update_camera_can_toggle_track_all_on_and_back_off(client):
+    client.post(
+        "/api/config/cameras",
+        json={"name": "front_door", "rtsp_url": "rtsp://127.0.0.1/x", "detector": "general", "track_objects": ["person"]},
+    )
+
+    turned_on = client.put(
+        "/api/config/cameras/front_door",
+        json={
+            "name": "front_door", "rtsp_url": "rtsp://127.0.0.1/x", "detector": "general",
+            "track_objects": ["person"], "track_all": True,
+        },
+    )
+    assert turned_on.json()["camera"]["track_all"] is True
+
+    turned_off = client.put(
+        "/api/config/cameras/front_door",
+        json={
+            "name": "front_door", "rtsp_url": "rtsp://127.0.0.1/x", "detector": "general",
+            "track_objects": ["person"], "track_all": False,
+        },
+    )
+    assert turned_off.json()["camera"]["track_all"] is False
+    # track_objects survived the round trip through track_all=True unchanged.
+    assert turned_off.json()["camera"]["track_objects"] == ["person"]
+
+
 def test_update_unknown_camera_returns_404(client):
     resp = client.put(
         "/api/config/cameras/nonexistent",
@@ -555,6 +615,166 @@ def test_camera_openvocab_direct_frame_can_be_enabled(client):
 
     fetched = client.get("/api/config/cameras/front_door").json()
     assert fetched["openvocab_direct_frame"] is True
+
+
+def test_track_objects_word_not_in_labelmap_auto_provisions_a_query(client):
+    """The core track_objects/open-vocab bridge: typing a word the routed detector's
+    labelmap doesn't know (general's is models/coco_labelmap.txt, no generic "animal"
+    class -- TODO_FIX_LIST.md item 4) into Track objects must auto-create a scoped,
+    enabled OpenVocabQuery for it, tagged source="track_objects" -- not leave it as a
+    silently dead config value the way it used to be.
+    """
+    client.post(
+        "/api/config/cameras",
+        json={
+            "name": "garage",
+            "rtsp_url": "rtsp://127.0.0.1/garage",
+            "detector": "general",
+            "track_objects": ["person", "animals"],
+        },
+    )
+
+    queries = client.get("/api/config/queries").json()
+    assert len(queries) == 1
+    assert queries[0]["text"] == "animals"
+    assert queries[0]["cameras"] == ["garage"]
+    assert queries[0]["enabled"] is True
+    assert queries[0]["source"] == "track_objects"
+
+    # "person" IS a real COCO label -- it must NOT also get an auto-provisioned query.
+    assert all(q["text"] != "person" for q in queries)
+
+
+def test_track_objects_auto_provisioning_enables_direct_frame_mode(client):
+    client.post(
+        "/api/config/cameras",
+        json={
+            "name": "garage",
+            "rtsp_url": "rtsp://127.0.0.1/garage",
+            "detector": "general",
+            "track_objects": ["animals"],
+        },
+    )
+    config = MirageConfig.from_db()
+    assert config.cameras["garage"].openvocab_direct_frame is True
+
+
+def test_track_objects_auto_provisioning_adds_alert_label(client):
+    """So a real OWLv2 match for "animals" actually drives ReviewSegment severity the
+    same way a native COCO word like "person" already does -- otherwise the match would
+    persist as a QueryMatch row but never surface as a review/alert at all.
+    """
+    client.post(
+        "/api/config/cameras",
+        json={
+            "name": "garage",
+            "rtsp_url": "rtsp://127.0.0.1/garage",
+            "detector": "general",
+            "track_objects": ["animals"],
+        },
+    )
+    config = MirageConfig.from_db()
+    assert "animals" in config.cameras["garage"].review.alerts.labels
+
+
+def test_removing_word_from_track_objects_deletes_its_auto_query(client):
+    client.post(
+        "/api/config/cameras",
+        json={
+            "name": "garage",
+            "rtsp_url": "rtsp://127.0.0.1/garage",
+            "detector": "general",
+            "track_objects": ["animals"],
+        },
+    )
+    assert len(client.get("/api/config/queries").json()) == 1
+
+    client.put(
+        "/api/config/cameras/garage",
+        json={
+            "name": "garage",
+            "rtsp_url": "rtsp://127.0.0.1/garage",
+            "detector": "general",
+            "track_objects": ["person"],
+        },
+    )
+    assert client.get("/api/config/queries").json() == []
+
+
+def test_deleting_camera_removes_its_auto_provisioned_queries(client):
+    client.post(
+        "/api/config/cameras",
+        json={
+            "name": "garage",
+            "rtsp_url": "rtsp://127.0.0.1/garage",
+            "detector": "general",
+            "track_objects": ["animals"],
+        },
+    )
+    assert len(client.get("/api/config/queries").json()) == 1
+
+    client.delete("/api/config/cameras/garage")
+    assert client.get("/api/config/queries").json() == []
+
+
+def test_manual_query_untouched_by_track_objects_sync_on_other_camera(client):
+    client.post(
+        "/api/config/cameras",
+        json={"name": "front_door", "rtsp_url": "rtsp://127.0.0.1/front_door", "detector": "general"},
+    )
+    manual = client.post(
+        "/api/config/queries", json={"text": "a red backpack", "cameras": ["front_door"]}
+    ).json()
+    assert manual["source"] == "manual"
+
+    client.post(
+        "/api/config/cameras",
+        json={
+            "name": "garage",
+            "rtsp_url": "rtsp://127.0.0.1/garage",
+            "detector": "general",
+            "track_objects": ["animals"],
+        },
+    )
+
+    queries = client.get("/api/config/queries").json()
+    assert len(queries) == 2
+    manual_after = next(q for q in queries if q["id"] == manual["id"])
+    assert manual_after["text"] == "a red backpack"
+    assert manual_after["source"] == "manual"
+
+
+def test_auto_provisioned_query_cannot_be_edited_directly(client):
+    client.post(
+        "/api/config/cameras",
+        json={
+            "name": "garage",
+            "rtsp_url": "rtsp://127.0.0.1/garage",
+            "detector": "general",
+            "track_objects": ["animals"],
+        },
+    )
+    auto_query = client.get("/api/config/queries").json()[0]
+
+    resp = client.put(f"/api/config/queries/{auto_query['id']}", json={"text": "something else"})
+    assert resp.status_code == 409
+
+
+def test_auto_provisioned_query_cannot_be_deleted_directly(client):
+    client.post(
+        "/api/config/cameras",
+        json={
+            "name": "garage",
+            "rtsp_url": "rtsp://127.0.0.1/garage",
+            "detector": "general",
+            "track_objects": ["animals"],
+        },
+    )
+    auto_query = client.get("/api/config/queries").json()[0]
+
+    resp = client.delete(f"/api/config/queries/{auto_query['id']}")
+    assert resp.status_code == 409
+    assert len(client.get("/api/config/queries").json()) == 1
 
 
 def test_list_queries_returns_empty_by_default(client):

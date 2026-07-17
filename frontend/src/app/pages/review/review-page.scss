@@ -148,11 +148,24 @@
   }
 }
 
-.detail-thumb img {
-  width: 100%;
+// Fixed 16:9 frame -- the card's shape stays consistent regardless of the underlying
+// snapshot's real resolution; object-fit: contain letterboxes a non-16:9 snapshot
+// rather than cropping it. No bounding boxes here -- this thumbnail sits alongside
+// a "Play video" action for the actual footage, and boxes are only ever shown on the
+// Events page's lightbox (see shared/lightbox/lightbox.ts) for a single detection's
+// snapshot.
+.detail-thumb {
+  position: relative;
+  background: var(--bg-overlay);
   aspect-ratio: 16 / 9;
-  object-fit: cover;
-  display: block;
+  overflow: hidden;
+
+  img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: block;
+  }
 }
 
 .detail-body {

@@ -171,6 +171,46 @@ def test_backpressure_deletes_oldest_excess_segments_per_camera(temp_db):
         assert remaining == []
 
 
+def test_run_once_scans_ffmpeg_open_files_only_once_per_cycle_not_per_segment(temp_db, monkeypatch):
+    """Regression test for OPTIMIZATION_OPPORTUNITIES.md item 3: the old
+    is_open_by_ffmpeg re-enumerated the ENTIRE host process table from scratch for
+    EVERY pending segment -- with multiple segments pending in one maintainer cycle
+    (up to MAX_SEGMENTS_IN_CACHE=6 per camera), that's real, measurable duplicated
+    work. ffmpeg_open_file_paths() must be called exactly ONCE per run_once(), and its
+    result reused for every segment in that cycle.
+    """
+    import mirage.recording.maintainer as maintainer_module
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cache_dir = Path(tmp) / "cache"
+        record_dir = Path(tmp) / "recordings"
+        cache_dir.mkdir()
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+        # 4 distinct fake (invalid) segments across 2 cameras, all pending in ONE cycle.
+        for i, cam in enumerate(["cam1", "cam1", "cam2", "cam2"]):
+            start = now - datetime.timedelta(seconds=(4 - i) * 10)
+            filename = f"{cam}@{start.strftime('%Y%m%d%H%M%S%z')}.mp4"
+            (cache_dir / filename).write_bytes(b"fake")
+
+        cameras = {"cam1": _camera("cam1", continuous_days=5), "cam2": _camera("cam2", continuous_days=5)}
+        maintainer = RecordingMaintainer(cameras, str(cache_dir), str(record_dir))
+
+        call_count = 0
+        real_fn = maintainer_module.ffmpeg_open_file_paths
+
+        def counting_wrapper():
+            nonlocal call_count
+            call_count += 1
+            return real_fn()
+
+        monkeypatch.setattr(maintainer_module, "ffmpeg_open_file_paths", counting_wrapper)
+
+        maintainer.run_once()
+
+        assert call_count == 1, f"expected exactly 1 process-table scan for 4 pending segments, got {call_count}"
+
+
 @pytest.mark.skipif(not TEST_VIDEO.exists(), reason="test_source.mp4 fixture not generated")
 def test_run_recording_maintainer_loop_runs_until_stopped(temp_db):
     with tempfile.TemporaryDirectory() as tmp:

@@ -191,13 +191,14 @@ def test_full_pipeline_capture_through_tracking(tcp_video_server, short_ipc_dir)
 
         assert len(results) >= 5, f"expected at least 5 processed frames through the full pipeline, got {len(results)}"
 
-        for camera_name_result, frame_name, frame_time, tracked_objects, motion_boxes, regions in results:
+        for camera_name_result, frame_name, frame_time, tracked_objects, motion_boxes, regions, frame_jpeg in results:
             assert camera_name_result == camera_name
             assert isinstance(frame_name, str)
             assert isinstance(frame_time, float)
             assert isinstance(tracked_objects, dict)
             assert isinstance(motion_boxes, list)
             assert isinstance(regions, list)
+            assert frame_jpeg is None or isinstance(frame_jpeg, bytes)
 
         # At least SOME frame across the whole run should have scanned a region (either
         # via startup scan or motion) -- confirms the pipeline isn't just passing empty
