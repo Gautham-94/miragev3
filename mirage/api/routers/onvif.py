@@ -48,8 +48,9 @@ class OnvifResolveOut(BaseModel):
 
 @router.get("/scan", response_model=list[OnvifDeviceOut])
 async def scan_onvif_devices(request: Request) -> list[OnvifDeviceOut]:
+    go2rtc_host = request.app.state.go2rtc_host
     go2rtc_api_port = request.app.state.go2rtc_api_port
-    url = f"http://127.0.0.1:{go2rtc_api_port}/api/onvif"
+    url = f"http://{go2rtc_host}:{go2rtc_api_port}/api/onvif"
 
     try:
         async with httpx.AsyncClient() as client:

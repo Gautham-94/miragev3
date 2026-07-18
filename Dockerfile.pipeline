@@ -1,0 +1,54 @@
+# mirage pipeline image: python -m mirage.supervisor (capture/detect/track/record +
+# go2rtc). Separate from Dockerfile.api/Dockerfile.frontend per the multi-container
+# design -- this is the heaviest image (numpy/opencv/torch/onnxruntime) and the one
+# that owns ffmpeg subprocesses, shared memory, and the actual camera connections.
+FROM python:3.12-slim
+
+# ffmpeg: required at runtime by every camera's capture/record ffmpeg subprocess
+# (mirage/capture/, mirage/recording/) -- not a Python dependency, must come from apt.
+# curl: go2rtc's own binary is fetched at first startup by
+# mirage/go2rtc/download.py (ensure_go2rtc_binary), which already auto-detects
+# linux/amd64 or linux/arm64 and downloads the correct release asset -- no manual
+# binary swap needed, unlike the macOS dev binary checked into bin/ for local use.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Dependencies first (own layer, cached across code-only changes).
+# --extra-index-url pytorch.org/cpu: this container has no GPU, and pip's default index
+# resolves torch==2.12.* to CUDA-bundled wheels (nvidia_cudnn_cu13/nvidia_nccl_cu13/etc,
+# 1GB+ of unused libraries) -- mirage/detection/execution_providers.py already falls back
+# to CPU-only execution providers, so those CUDA wheels would just be dead weight here.
+COPY requirements.txt ./
+RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt
+
+COPY pyproject.toml ./
+COPY mirage ./mirage
+COPY models ./models
+RUN pip install --no-cache-dir -e .
+
+# CACHE_DIR/RECORD_DIR/CONFIG_DIR/MODEL_CACHE_DIR/GO2RTC_BIN_DIR are all overridden via
+# env vars in docker-compose.yml (see mirage/const.py's own env-var-driven defaults) --
+# these just give the image sane standalone defaults if run without compose.
+ENV MIRAGE_CACHE_DIR=/data/cache \
+    MIRAGE_BASE_DIR=/data/media \
+    MIRAGE_CONFIG_DIR=/data/config \
+    MIRAGE_MODEL_CACHE_DIR=/app/models \
+    MIRAGE_GO2RTC_BIN_DIR=/data/go2rtc-bin \
+    PYTHONUNBUFFERED=1
+
+# go2rtc's own ports (see mirage/go2rtc/config.py's DEFAULT_API_PORT/DEFAULT_WEBRTC_PORT)
+# -- exposed for live-view/WebRTC; the pipeline itself has no HTTP surface of its own
+# (that's mirage.api, a separate image).
+EXPOSE 1984 8555
+
+# `python -m mirage.supervisor` (NOT `python -m mirage` directly) -- see
+# mirage/supervisor.py's own module docstring: this is what makes the frontend's
+# "Apply changes" button able to request a clean pipeline restart via a shared
+# status/restart-request file pair, instead of requiring a container restart for
+# every config change.
+ENTRYPOINT ["python", "-m", "mirage.supervisor", "-v"]

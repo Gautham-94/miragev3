@@ -26,7 +26,7 @@ router = APIRouter(prefix="/api/live", tags=["live"])
 
 
 def _go2rtc_api_base(request: Request) -> str:
-    return f"http://127.0.0.1:{request.app.state.go2rtc_api_port}"
+    return f"http://{request.app.state.go2rtc_host}:{request.app.state.go2rtc_api_port}"
 
 
 @router.get("/{camera}/snapshot.jpg")
@@ -61,7 +61,7 @@ async def live_ws_proxy(websocket: WebSocket, camera: str) -> None:
 
     await websocket.accept()
 
-    go2rtc_url = f"ws://127.0.0.1:{websocket.app.state.go2rtc_api_port}/api/ws?src={camera}"
+    go2rtc_url = f"ws://{websocket.app.state.go2rtc_host}:{websocket.app.state.go2rtc_api_port}/api/ws?src={camera}"
     try:
         upstream = await websockets.connect(go2rtc_url, open_timeout=10)
     except OSError as e:

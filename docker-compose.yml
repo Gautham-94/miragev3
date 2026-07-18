@@ -1,0 +1,52 @@
+# Multi-container mirage stack: pipeline (capture/detect/track/record + go2rtc), api
+# (read-only FastAPI, shares the pipeline's DB/media/config via volumes), frontend
+# (nginx + built Angular app, reverse-proxies /api/* to the api service). mock_cameras is
+# intentionally NOT included here -- it's a local dev-only synthetic RTSP source, out of
+# scope for this stack (see NVR_EXTENSION_MULTI_MODEL_ROUTING.md discussion / user request).
+services:
+  pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile.pipeline
+    # SharedMemoryFrameManager (mirage/util/shm.py) sizes its per-camera frame ring
+    # buffers against available /dev/shm; Docker's 64MB default is nowhere near enough
+    # for more than one camera at real resolution/fps. Adjust upward if you add many
+    # cameras or run at high resolution -- see calculate_shm_ring_depth.
+    shm_size: "2gb"
+    volumes:
+      - config:/data/config
+      - media:/data/media
+      - cache:/data/cache
+      - go2rtc-bin:/data/go2rtc-bin
+    ports:
+      - "1984:1984" # go2rtc API/HTTP (snapshot fallback, direct debugging)
+      - "8555:8555" # go2rtc WebRTC
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    volumes:
+      - config:/data/config
+      - media:/data/media
+      - cache:/data/cache
+    depends_on:
+      - pipeline
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  config:
+  media:
+  cache:
+  go2rtc-bin:

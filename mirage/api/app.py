@@ -34,6 +34,7 @@ def create_app(
     config: MirageConfig | None = None,
     db_path: str | None = None,
     cors_origins: list[str] | None = None,
+    go2rtc_host: str = "127.0.0.1",
     go2rtc_api_port: int = DEFAULT_API_PORT,
     export_dir: str = DEFAULT_EXPORT_DIR,
     cache_dir: str = DEFAULT_CACHE_DIR,
@@ -46,6 +47,11 @@ def create_app(
     reads) -- baking a single static config into app.state at startup would silently go
     stale the moment a camera is added or edited.
 
+    `go2rtc_host` defaults to 127.0.0.1 for the normal single-host layout (mirage.api and
+    go2rtc/mirage.supervisor on the same machine); Docker's multi-container topology runs
+    go2rtc inside a separate pipeline container, so that deployment overrides this to the
+    pipeline container's Docker network hostname (see Dockerfile.api/docker-compose.yml).
+
     `export_dir` is injectable (same reasoning as go2rtc_api_port above) so tests can
     point stitched review clips at a throwaway tmp_path instead of the real module-level
     EXPORT_DIR constant -- avoids monkeypatching an env var and reloading mirage.const,
@@ -54,6 +60,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.database = init_database(db_path) if db_path else None
+        app.state.go2rtc_host = go2rtc_host
         app.state.go2rtc_api_port = go2rtc_api_port
         app.state.export_dir = export_dir
         app.state.cache_dir = cache_dir
