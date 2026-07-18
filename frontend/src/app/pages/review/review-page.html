@@ -27,7 +27,7 @@
                 <app-icon name="imageOff" [size]="22" />
               </div>
             }
-            <span class="severity-chip" [class.severity-alert]="segment.severity === 'alert'">
+            <span class="severity-chip" [class.severity-alert]="segment.severity === 'alert'" [class.severity-rule]="segment.severity === 'rule'">
               {{ segment.severity }}
             </span>
           </div>
@@ -59,7 +59,7 @@
           }
         </div>
         <div class="detail-body">
-          <span class="severity-chip" [class.severity-alert]="segment.severity === 'alert'">
+          <span class="severity-chip" [class.severity-alert]="segment.severity === 'alert'" [class.severity-rule]="segment.severity === 'rule'">
             {{ segment.severity }}
           </span>
           <h2 class="detail-camera">{{ segment.camera }}</h2>

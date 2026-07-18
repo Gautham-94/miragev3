@@ -77,6 +77,12 @@ export class AddCameraPage implements OnInit {
   // against the whole motion-triggered frame instead -- for open-vocab items outside
   // that detector's label map entirely (see CameraConfig.openvocab_direct_frame).
   protected readonly openvocabDirectFrame = signal(false);
+  // Both empty string (disabled) by default -- see RulesConfig's own docstring.
+  // crowdThreshold: alert once this many confirmed "person" tracks are present at
+  // once. dwellSeconds: alert once ANY tracked object has been continuously present
+  // for at least this long (covers both loitering and queue-wait-time).
+  protected readonly crowdThreshold = signal<number | null>(null);
+  protected readonly dwellSeconds = signal<number | null>(null);
 
   protected readonly detectors = signal<Detector[]>([]);
   protected readonly saving = signal(false);
@@ -131,6 +137,8 @@ export class AddCameraPage implements OnInit {
           this.segmentSeconds.set(cam.segment_seconds);
           this.rtspTransport.set(cam.rtsp_transport);
           this.openvocabDirectFrame.set(cam.openvocab_direct_frame);
+          this.crowdThreshold.set(cam.crowd_threshold);
+          this.dwellSeconds.set(cam.dwell_seconds);
           this.step.set('details');
         },
         error: (err) => {
@@ -258,6 +266,8 @@ export class AddCameraPage implements OnInit {
       segment_seconds: this.segmentSeconds(),
       rtsp_transport: this.rtspTransport(),
       openvocab_direct_frame: this.openvocabDirectFrame(),
+      crowd_threshold: this.crowdThreshold(),
+      dwell_seconds: this.dwellSeconds(),
     };
 
     const request = this.isEditMode
@@ -302,6 +312,8 @@ export class AddCameraPage implements OnInit {
     this.rtspTransport.set('tcp');
     this.segmentSeconds.set(10);
     this.openvocabDirectFrame.set(false);
+    this.crowdThreshold.set(null);
+    this.dwellSeconds.set(null);
     this.savedCameraName.set(null);
     this.savedOpenVocabTerms.set([]);
   }

@@ -34,6 +34,7 @@ from mirage.openvocab.dispatcher import OpenVocabDispatcher
 from mirage.openvocab.process import OpenVocabProcess
 from mirage.recording.maintainer import RecordingMaintainer, run_recording_maintainer_loop
 from mirage.tracking.camera_tracker import CameraTracker
+from mirage.tracking.rules import RulesEngine
 from mirage.util.shm import (
     SharedMemoryFrameManager,
     calculate_shm_ring_depth,
@@ -89,6 +90,7 @@ class MirageApp:
         thumbnail_fetcher = self._fetch_go2rtc_thumbnail if self.enable_go2rtc else None
         self.event_processor = EventProcessor(thumbnail_fetcher=thumbnail_fetcher)
         self.review_maintainer = ReviewSegmentMaintainer(thumbnail_fetcher=thumbnail_fetcher)
+        self.rules_engine = RulesEngine()
         self.result_consumer_thread: threading.Thread | None = None
         self.record_thread: threading.Thread | None = None
         self.record_stop_event = threading.Event()
@@ -337,7 +339,22 @@ class MirageApp:
                     camera, frame_time, objects_for_review, frame_jpeg=frame_jpeg,
                     object_frame_jpegs=synthetic_frame_jpegs,
                 )
-                self.review_maintainer.process(camera, frame_time, objects_for_review, frame_jpeg=frame_jpeg)
+
+                # Rule triggers (crowd count / dwell-time -- mirage.tracking.rules)
+                # feed ONLY ReviewSegmentMaintainer, deliberately NOT EventProcessor:
+                # per the user's explicit choice, a rule firing surfaces as a
+                # ReviewSegment (severity="rule") on the existing Review page, not as
+                # a new kind of Event -- a crowd/dwell condition isn't "one tracked
+                # object," so it doesn't fit Events' per-object model the way an
+                # open-vocab match (a real, single detected thing) does. Built on
+                # objects_for_review (already includes any openvocab synthetic
+                # entries) so a rule can, in principle, also fire on a synthetic
+                # open-vocab-detected object's dwell time.
+                rule_triggers = self.rules_engine.process(camera, frame_time, objects_for_review)
+                objects_for_review_with_rules = (
+                    {**objects_for_review, **rule_triggers} if rule_triggers else objects_for_review
+                )
+                self.review_maintainer.process(camera, frame_time, objects_for_review_with_rules, frame_jpeg=frame_jpeg)
             except Exception:
                 logger.exception("%s: error consuming tracked-object result", camera_name)
 

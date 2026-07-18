@@ -79,6 +79,27 @@ def test_qualifies_for_review_false_when_stationary():
     assert qualifies_for_review(state) is False
 
 
+def test_classify_severity_rule_for_a_rule_prefixed_object_id():
+    """A rule-triggered synthetic object (mirage.tracking.rules.RulesEngine) is always
+    Severity.rule, regardless of its dynamic label text and regardless of whether that
+    label happens to also be in the camera's alert/detection lists.
+    """
+    camera = _camera()
+    assert classify_severity("crowd (12)", camera, obj_id="rule-crowd-cam1") == Severity.rule
+    # Even a label that WOULD otherwise classify as "alert" -- the id prefix wins.
+    assert classify_severity("person", camera, obj_id="rule-dwell-obj1") == Severity.rule
+
+
+def test_qualifies_for_review_true_for_rule_object_even_if_stationary():
+    """The one deliberate exception to the stationary-exclusion rule: dwell-time/
+    loitering is specifically about objects that may not be moving much, so a
+    rule-triggered synthetic object must NOT be excluded just because its underlying
+    real object happens to be classified as stationary.
+    """
+    state = _stationary_state("rule-dwell-obj1", "loitering (65s)")
+    assert qualifies_for_review(state, obj_id="rule-dwell-obj1") is True
+
+
 def test_qualifies_for_review_true_when_active_and_not_false_positive():
     state = _active_state("obj1", "person", is_false_positive=False)
     assert qualifies_for_review(state) is True
@@ -170,6 +191,113 @@ def test_detection_segment_upgrades_to_alert_when_alert_object_appears(db):
     )
     row = ReviewSegment.get(ReviewSegment.camera == "cam1")
     assert row.severity == "alert"
+
+
+def test_rule_triggered_object_creates_a_rule_severity_segment(db):
+    maintainer = ReviewSegmentMaintainer(cutoff_seconds=10)
+    camera = _camera()
+    state = _active_state("rule-crowd-cam1", "crowd (12)", frame_time=100.0)
+
+    maintainer.process(camera, 100.0, {"rule-crowd-cam1": state})
+
+    row = ReviewSegment.get(ReviewSegment.camera == "cam1")
+    assert row.severity == "rule"
+    assert "crowd (12)" in row.data["objects"]
+
+
+def test_rule_label_updates_in_place_instead_of_accumulating_every_second(db):
+    """Regression test for a REAL bug the user caught live via a screenshot: a
+    loitering alert's card showed "Loitering (120s), Loitering (121s), Loitering
+    (122s), ..." -- dozens of near-identical entries, one per second, instead of a
+    single entry whose count keeps updating. Caused by objects being a plain set of
+    label STRINGS with no concept of "this is the same underlying rule trigger, just a
+    later reading" -- fixed by keying rule-triggered labels by obj_id
+    (PendingReviewSegment.rule_labels) so the SAME entry updates in place.
+    """
+    maintainer = ReviewSegmentMaintainer(cutoff_seconds=10)
+    camera = _camera()
+
+    for elapsed in range(120, 178):
+        state = _active_state("rule-dwell-person1", f"loitering ({elapsed}s)", frame_time=100.0 + elapsed)
+        maintainer.process(camera, 100.0 + elapsed, {"rule-dwell-person1": state})
+
+    row = ReviewSegment.get(ReviewSegment.camera == "cam1")
+    loitering_entries = [o for o in row.data["objects"] if "loitering" in o]
+    # Exactly ONE entry for this rule trigger, holding the MOST RECENT count -- not 58
+    # (one per second processed above).
+    assert loitering_entries == ["loitering (177s)"]
+
+
+def test_rule_label_and_a_real_object_label_coexist_correctly(db):
+    """A real object's label (e.g. "person") still accumulates in the historical
+    `objects` set as before -- only rule-triggered labels get the update-in-place
+    treatment, so this must not regress the pre-existing behavior for real labels.
+    """
+    maintainer = ReviewSegmentMaintainer(cutoff_seconds=10)
+    camera = _camera()
+
+    maintainer.process(
+        camera, 100.0,
+        {
+            "person1": _active_state("person1", "person", 100.0),
+            "rule-dwell-person1": _active_state("rule-dwell-person1", "loitering (120s)", 100.0),
+        },
+    )
+    maintainer.process(
+        camera, 101.0,
+        {
+            "person1": _active_state("person1", "person", 101.0),
+            "rule-dwell-person1": _active_state("rule-dwell-person1", "loitering (121s)", 101.0),
+        },
+    )
+
+    row = ReviewSegment.get(ReviewSegment.camera == "cam1")
+    assert "person" in row.data["objects"]
+    assert "loitering (121s)" in row.data["objects"]
+    assert "loitering (120s)" not in row.data["objects"]
+
+
+def test_alert_segment_upgrades_to_rule_when_a_rule_object_appears(db):
+    """rule outranks alert (see mirage.events.review._SEVERITY_RANK) -- an
+    already-open alert segment must upgrade to rule severity, never the reverse.
+    """
+    maintainer = ReviewSegmentMaintainer(cutoff_seconds=10)
+    camera = _camera()
+
+    maintainer.process(camera, 100.0, {"person1": _active_state("person1", "person", 100.0)})
+    row = ReviewSegment.get(ReviewSegment.camera == "cam1")
+    assert row.severity == "alert"
+
+    maintainer.process(
+        camera, 101.0,
+        {
+            "person1": _active_state("person1", "person", 101.0),
+            "rule-dwell-person1": _active_state("rule-dwell-person1", "loitering (65s)", 101.0),
+        },
+    )
+    row = ReviewSegment.get(ReviewSegment.camera == "cam1")
+    assert row.severity == "rule"
+
+
+def test_rule_segment_never_downgrades_back_to_alert(db):
+    maintainer = ReviewSegmentMaintainer(cutoff_seconds=10)
+    camera = _camera()
+
+    maintainer.process(
+        camera, 100.0,
+        {
+            "person1": _active_state("person1", "person", 100.0),
+            "rule-crowd-cam1": _active_state("rule-crowd-cam1", "crowd (5)", 100.0),
+        },
+    )
+    row = ReviewSegment.get(ReviewSegment.camera == "cam1")
+    assert row.severity == "rule"
+
+    # Rule condition clears (crowd drops below threshold), but the person alert is
+    # still active -- severity must NOT drop back down to "alert".
+    maintainer.process(camera, 101.0, {"person1": _active_state("person1", "person", 101.0)})
+    row = ReviewSegment.get(ReviewSegment.camera == "cam1")
+    assert row.severity == "rule"
 
 
 def test_segment_closes_after_cutoff_with_no_activity(db):

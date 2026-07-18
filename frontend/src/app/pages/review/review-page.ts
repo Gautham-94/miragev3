@@ -11,6 +11,7 @@ import { VideoLightbox } from '../../shared/video-lightbox/video-lightbox';
 
 const SEVERITY_OPTIONS: FilterOption[] = [
   { value: '', label: 'All severities' },
+  { value: 'rule', label: 'Rule' },
   { value: 'alert', label: 'Alert' },
   { value: 'detection', label: 'Detection' },
 ];
