@@ -281,6 +281,29 @@ class ReviewConfig(BaseModel):
     cutoff_seconds: int = 30
 
 
+class RulesConfig(BaseModel):
+    """Camera-level derived-condition alerts (TODO_FIX_LIST.md item 7.4's "rules
+    engine") -- distinct from ReviewConfig's per-label alert/detection classification,
+    since these two rules are conditions computed from the CURRENT SET of tracked
+    objects (a count, a duration), not any single object's label. Both are opt-in
+    (None/0 = disabled) and off by default -- a camera with no rules configured
+    behaves exactly as it did before this feature existed. See mirage/tracking/rules.py
+    (RulesEngine) for the actual evaluation logic.
+    """
+
+    # Fires a "crowd" alert once the number of currently-confirmed `person` tracks on
+    # this camera reaches this count. None/0 disables the rule.
+    crowd_threshold: int | None = None
+    # Fires a "loitering"/wait-time alert once ANY tracked object has been
+    # continuously present for at least this many seconds -- deliberately
+    # movement-agnostic (counts total time tracked, not just time spent motionless),
+    # so the same rule covers both "person loitering at a doorway" and "customer
+    # waiting in a queue" (a slowly-shuffling-forward track is not "stationary" in
+    # mirage.tracking.stationary's sense, but should still count toward wait time).
+    # None/0 disables the rule.
+    dwell_seconds: int | None = None
+
+
 # --------------------------------------------------------------------------------------
 # Camera + top-level config
 # --------------------------------------------------------------------------------------
@@ -295,6 +318,7 @@ class CameraConfig(BaseModel):
     objects: ObjectsConfig = Field(default_factory=ObjectsConfig)
     record: RecordConfig = Field(default_factory=RecordConfig)
     review: ReviewConfig = Field(default_factory=ReviewConfig)
+    rules: RulesConfig = Field(default_factory=RulesConfig)
     detector: str = "default"  # which DetectorInstanceConfig this camera routes detection through
     # False (default): open-vocab queries (mirage.openvocab) only ever check crops of
     # objects the closed-vocab detector (`detector` above) already confirmed --

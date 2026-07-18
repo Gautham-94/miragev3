@@ -45,6 +45,7 @@ from mirage.config.schema import (
     ReviewConfig,
     ReviewLabelConfig,
     RtspTransport,
+    RulesConfig,
     TensorLayout,
     split_track_objects,
 )
@@ -104,6 +105,12 @@ class CameraWriteRequest(BaseModel):
     # confirmed; True checks the whole motion-triggered frame directly, for queries about
     # things that detector was never trained to recognize as an object at all.
     openvocab_direct_frame: bool = False
+    # See RulesConfig's own docstring -- both None/0 (default) disable their respective
+    # rule. crowd_threshold: alert once this many confirmed "person" tracks are present
+    # at once. dwell_seconds: alert once ANY tracked object has been continuously
+    # present for at least this long (covers both loitering and queue-wait-time).
+    crowd_threshold: int | None = Field(default=None, ge=1)
+    dwell_seconds: int | None = Field(default=None, ge=1)
 
 
 class ConfigMutationResponse(BaseModel):
@@ -143,6 +150,8 @@ class CameraConfigOut(BaseModel):
     alert_labels: list[str]
     detection_labels: list[str]
     openvocab_direct_frame: bool
+    crowd_threshold: int | None
+    dwell_seconds: int | None
 
 
 def _primary_input(cam: CameraConfig) -> CameraInputConfig | None:
@@ -182,6 +191,8 @@ def _camera_config_out(cam: CameraConfig) -> CameraConfigOut:
         alert_labels=cam.review.alerts.labels,
         detection_labels=cam.review.detections.labels,
         openvocab_direct_frame=cam.openvocab_direct_frame,
+        crowd_threshold=cam.rules.crowd_threshold,
+        dwell_seconds=cam.rules.dwell_seconds,
     )
 
 
@@ -300,6 +311,7 @@ def _build_camera_config(req: CameraWriteRequest) -> CameraConfig:
             enabled=req.record_enabled, segment_seconds=req.segment_seconds, continuous=RetainConfig(days=req.retain_days)
         ),
         review=ReviewConfig(**review_kwargs) if review_kwargs else ReviewConfig(),
+        rules=RulesConfig(crowd_threshold=req.crowd_threshold, dwell_seconds=req.dwell_seconds),
         detector=req.detector,
         openvocab_direct_frame=req.openvocab_direct_frame,
     )

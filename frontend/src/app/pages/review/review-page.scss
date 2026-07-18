@@ -77,6 +77,11 @@
     background: var(--severity-alert-wash);
     color: var(--severity-alert);
   }
+
+  &.severity-rule {
+    background: var(--severity-rule-wash);
+    color: var(--severity-rule);
+  }
 }
 
 .card-body {

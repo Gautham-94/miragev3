@@ -250,6 +250,36 @@
           </div>
         }
 
+        <div class="field-row">
+          <label class="field">
+            <span>Crowd alert threshold (people)</span>
+            <input
+              type="number"
+              [ngModel]="crowdThreshold()"
+              (ngModelChange)="crowdThreshold.set($event)"
+              name="crowdThreshold"
+              min="1"
+              placeholder="off"
+            />
+          </label>
+          <label class="field">
+            <span>Loitering / wait-time alert after (seconds)</span>
+            <input
+              type="number"
+              [ngModel]="dwellSeconds()"
+              (ngModelChange)="dwellSeconds.set($event)"
+              name="dwellSeconds"
+              min="1"
+              placeholder="off"
+            />
+          </label>
+        </div>
+        <p class="form-hint">
+          Crowd: alerts once this many people are visible at once. Loitering/wait-time: alerts once ANY tracked
+          object has stayed continuously in view this long — works equally for someone loitering or a customer
+          waiting in a queue. Leave either blank to disable it.
+        </p>
+
         @if (saveError()) {
           <div class="inline-error">{{ saveError() }}</div>
         }

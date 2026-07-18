@@ -41,7 +41,10 @@ export interface Recording {
   segment_size_mb: number;
 }
 
-export type ReviewSeverity = 'alert' | 'detection';
+// 'rule' = a camera-level derived-condition alert (crowd count / dwell-time-loitering
+// -- see mirage.tracking.rules.RulesEngine) rather than a per-object-label
+// classification. Always outranks 'alert' (see mirage.events.review._SEVERITY_RANK).
+export type ReviewSeverity = 'alert' | 'detection' | 'rule';
 
 export interface ReviewSegment {
   id: string;
@@ -136,6 +139,13 @@ export interface CameraWriteRequest {
   enabled?: boolean;
   rtsp_transport?: RtspTransport;
   openvocab_direct_frame?: boolean;
+  // See mirage.config.schema.RulesConfig's docstring -- both undefined/null (default)
+  // disable their respective rule. crowd_threshold: alert once this many confirmed
+  // "person" tracks are present at once. dwell_seconds: alert once ANY tracked object
+  // has been continuously present for at least this long (covers both loitering and
+  // queue-wait-time -- one rule, see RulesConfig.dwell_seconds for why).
+  crowd_threshold?: number | null;
+  dwell_seconds?: number | null;
 }
 
 export interface CameraConfigDetail {
@@ -155,6 +165,8 @@ export interface CameraConfigDetail {
   alert_labels: string[];
   detection_labels: string[];
   openvocab_direct_frame: boolean;
+  crowd_threshold: number | null;
+  dwell_seconds: number | null;
 }
 
 export interface ConfigMutationResponse {
