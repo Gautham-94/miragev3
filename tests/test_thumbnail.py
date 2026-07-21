@@ -10,7 +10,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from mirage.util.thumbnail import capture_thumbnail, draw_boxes_on_jpeg_bytes, write_clean_snapshot
+from mirage.util.thumbnail import capture_thumbnail, crop_jpeg_to_box, draw_boxes_on_jpeg_bytes, write_clean_snapshot
 
 
 def test_capture_thumbnail_writes_file_and_returns_path():
@@ -195,4 +195,35 @@ def test_draw_boxes_on_jpeg_bytes_with_no_boxes_returns_the_same_image():
 
 def test_draw_boxes_on_jpeg_bytes_returns_none_for_invalid_jpeg():
     result = draw_boxes_on_jpeg_bytes(b"not a real jpeg", [("person", (0.0, 0.0, 10.0, 10.0))])
+    assert result is None
+
+
+def test_crop_jpeg_to_box_returns_a_smaller_valid_jpeg():
+    frame_jpeg = _real_jpeg(width=100, height=80)
+    result = crop_jpeg_to_box(frame_jpeg, (10.0, 10.0, 50.0, 60.0))
+
+    assert result is not None
+    arr = np.frombuffer(result, dtype=np.uint8)
+    decoded = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    assert decoded.shape[:2] == (50, 40)  # (y2-y1, x2-x1)
+
+
+def test_crop_jpeg_to_box_clamps_out_of_bounds_box():
+    frame_jpeg = _real_jpeg(width=100, height=80)
+    result = crop_jpeg_to_box(frame_jpeg, (-20.0, -20.0, 200.0, 200.0))
+
+    assert result is not None
+    arr = np.frombuffer(result, dtype=np.uint8)
+    decoded = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    assert decoded.shape[:2] == (80, 100)  # clamped to the full frame
+
+
+def test_crop_jpeg_to_box_returns_none_for_degenerate_box():
+    frame_jpeg = _real_jpeg(width=100, height=80)
+    assert crop_jpeg_to_box(frame_jpeg, (500.0, 500.0, 600.0, 600.0)) is None  # entirely out of bounds
+    assert crop_jpeg_to_box(frame_jpeg, (10.0, 10.0, 10.0, 60.0)) is None  # zero width
+
+
+def test_crop_jpeg_to_box_returns_none_for_invalid_jpeg():
+    result = crop_jpeg_to_box(b"not a real jpeg", (0.0, 0.0, 10.0, 10.0))
     assert result is None

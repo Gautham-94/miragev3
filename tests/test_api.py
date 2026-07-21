@@ -144,6 +144,21 @@ def test_list_events_filters_by_time_range(client):
     assert ids == {"ev2"}
 
 
+def test_list_events_filters_by_species_status(client):
+    Event.create(
+        id="ev1", label="animal", camera="front_door", start_time=utc_from_timestamp(1000.0),
+        score=0.9, top_score=0.9, false_positive=False, data={"species_status": "pending"},
+    )
+    Event.create(
+        id="ev2", label="animal", camera="front_door", start_time=utc_from_timestamp(1001.0),
+        score=0.9, top_score=0.9, false_positive=False, data={"species_status": "complete"},
+    )
+
+    resp = client.get("/api/events", params={"species_status": "pending"})
+    ids = {e["id"] for e in resp.json()}
+    assert ids == {"ev1"}
+
+
 def test_get_event_not_found(client):
     resp = client.get("/api/events/nonexistent")
     assert resp.status_code == 404
@@ -163,6 +178,32 @@ def test_get_event_roundtrip(client):
     assert body["end_time"] == 1010.0
     assert body["zones"] == ["yard"]
     assert body["has_clip"] is True
+
+
+def test_get_event_species_fields_default_when_data_empty(client):
+    Event.create(id="ev1", label="person", camera="front_door", start_time=utc_from_timestamp(1000.0))
+    resp = client.get("/api/events/ev1")
+    body = resp.json()
+    assert body["species"] is None
+    assert body["species_status"] == "not_applicable"
+    assert body["species_confidence"] is None
+    assert body["species_taxonomy"] is None
+
+
+def test_get_event_species_fields_populated_from_data(client):
+    Event.create(
+        id="ev1", label="animal", camera="front_door", start_time=utc_from_timestamp(1000.0),
+        data={
+            "species": "Odocoileus virginianus", "species_status": "complete",
+            "species_confidence": 0.93, "species_taxonomy": {"class": "Mammalia"},
+        },
+    )
+    resp = client.get("/api/events/ev1")
+    body = resp.json()
+    assert body["species"] == "Odocoileus virginianus"
+    assert body["species_status"] == "complete"
+    assert body["species_confidence"] == 0.93
+    assert body["species_taxonomy"] == {"class": "Mammalia"}
 
 
 def test_get_event_snapshot_no_snapshot_returns_404(client):

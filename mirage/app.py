@@ -29,10 +29,13 @@ from mirage.events.processor import EventProcessor
 from mirage.events.review import ReviewSegmentMaintainer
 from mirage.go2rtc.process import Go2rtcProcess
 from mirage.ipc.zmq_pubsub import ZmqProxy
+from mirage.logging_bus import ActivityLogWriter, LogEvent
 from mirage.openvocab.device import resolve_device
 from mirage.openvocab.dispatcher import OpenVocabDispatcher
 from mirage.openvocab.process import OpenVocabProcess
 from mirage.recording.maintainer import RecordingMaintainer, run_recording_maintainer_loop
+from mirage.species.dispatcher import SpeciesDispatcher
+from mirage.species.process import SpeciesProcess
 from mirage.tracking.camera_tracker import CameraTracker
 from mirage.tracking.rules import RulesEngine
 from mirage.util.shm import (
@@ -76,7 +79,22 @@ class MirageApp:
         self.detector_pub_addr = ipc_addr("detector_pub", cache_dir=self.cache_dir)
         self.detector_sub_addr = ipc_addr("detector_sub", cache_dir=self.cache_dir)
 
-        self.detection_queues: dict[str, "mp.Queue"] = {}  # detector name -> queue
+        # detector name -> the ONE queue every camera routed to that detector puts onto,
+        # and every one of that detector's num_workers processes consumes from (see
+        # _start_detectors). A single shared multi-consumer mp.Queue gives free
+        # least-busy-worker routing: mp.Queue's own internal lock/pipe already hands
+        # each queued item to whichever consumer's blocking .get() happens to unblock
+        # first, so a worker that just finished a fast inference naturally picks up the
+        # next request before a still-busy worker does -- no separate queue-depth
+        # tracking or broker needed. This is why detection_queues is keyed by detector
+        # name (every camera on that detector shares the identical queue reference),
+        # NOT by camera name or worker index.
+        self.detection_queues: dict[str, "mp.Queue"] = {}
+        # "detector_name" (num_workers==1) or "detector_name#0", "detector_name#1", ...
+        # (num_workers>1) -> that worker's process -- see _start_detectors. Every
+        # worker for a given detector is otherwise identical (same model, same shared
+        # queue) -- the #N suffix exists only to give each worker's OS process/watchdog
+        # entry a distinct key, not to signal a different camera assignment.
         self.detector_processes: dict[str, DetectorProcess] = {}
         self.record_process = None
         self.capture_processes: dict[str, object] = {}
@@ -87,8 +105,19 @@ class MirageApp:
         self.manager = mp.Manager()
         self.detected_frames_queue = self.manager.Queue(maxsize=(len(config.cameras) + 2) * 2)
 
+        # Structured activity log (Logs page) -- every pipeline process/thread puts
+        # LogEvents here; only the main-process result-consumer loop drains it and
+        # appends to the shared activity_log.jsonl file mirage.api tails (see
+        # mirage.logging_bus's module docstring for the full one-writer reasoning).
+        # Unbounded-ish maxsize: log events are small and infrequent (one per
+        # motion/detect/species milestone, not per-frame) compared to detection_queues,
+        # so this is sized generously rather than tightly like those queues.
+        self.activity_log_queue: "mp.Queue" = self.manager.Queue(maxsize=2000)
+        self.activity_log_writer: ActivityLogWriter | None = None
+
         thumbnail_fetcher = self._fetch_go2rtc_thumbnail if self.enable_go2rtc else None
         self.event_processor = EventProcessor(thumbnail_fetcher=thumbnail_fetcher)
+        self.event_processor.activity_log_queue = self.activity_log_queue
         self.review_maintainer = ReviewSegmentMaintainer(thumbnail_fetcher=thumbnail_fetcher)
         self.rules_engine = RulesEngine()
         self.result_consumer_thread: threading.Thread | None = None
@@ -107,6 +136,17 @@ class MirageApp:
         self.openvocab_request_queue = None
         self.openvocab_result_queue = None
 
+        # SpeciesProcess is only spawned if config.species_classifier.enabled -- mirrors
+        # OpenVocabProcess's own lazy-start reasoning above (no point loading a species
+        # classification model if the user hasn't opted in, which is the default). See
+        # _start_species_worker. self.species_dispatcher stays None in that case, and
+        # EventProcessor._on_start/​_result_consumer_loop simply skip the species step
+        # entirely (see mirage.events.processor.EventProcessor.species_dispatcher).
+        self.species_process: SpeciesProcess | None = None
+        self.species_dispatcher: SpeciesDispatcher | None = None
+        self.species_request_queue = None
+        self.species_result_queue = None
+
     # ------------------------------------------------------------------
     # Startup
     # ------------------------------------------------------------------
@@ -116,6 +156,8 @@ class MirageApp:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self.database = init_database(self.db_path)
         self.event_processor.close_dangling_events()
+
+        self.activity_log_writer = ActivityLogWriter(self.cache_dir)
 
         self.zmq_proxy = ZmqProxy(self.detector_pub_addr, self.detector_sub_addr)
 
@@ -128,6 +170,7 @@ class MirageApp:
         self._preallocate_camera_shm()
         self._start_detectors()
         self._start_openvocab()
+        self._start_species_worker()
         self._start_record_process()
         self._start_cameras()
 
@@ -152,10 +195,16 @@ class MirageApp:
         for camera in self.config.cameras.values():
             if not camera.enabled:
                 continue
+            detector_config = self.config.detectors.get(camera.detector)
+            if detector_config is None or not detector_config.enabled:
+                # Logged once already in _start_detectors (which runs first) -- skip
+                # this camera's SHM entirely rather than pre-creating input/output
+                # rings for a detector process that will never exist.
+                continue
+
             self.camera_ring_depths[camera.name] = ring_depth
             preallocate_ring(self.frame_manager, camera.name, ring_depth, camera.detect.width, camera.detect.height)
 
-            detector_config = self.config.detectors[camera.detector]
             input_size = detector_config.model.height * detector_config.model.width * 3
             self.frame_manager.create(detector_input_shm_name(camera.name), input_size)
             from mirage.const import OUTPUT_SHM_SIZE
@@ -169,20 +218,62 @@ class MirageApp:
                 cameras_by_detector.setdefault(camera.detector, []).append(camera.name)
 
         for detector_name, detector_config in self.config.detectors.items():
+            if not detector_config.enabled:
+                routed_cameras = cameras_by_detector.get(detector_name, [])
+                if routed_cameras:
+                    logger.warning(
+                        "detector %r is disabled; camera(s) %s will not detect until reassigned or "
+                        "this detector is re-enabled", detector_name, routed_cameras,
+                    )
+                else:
+                    logger.info("detector %r is disabled, skipping process startup", detector_name)
+                continue
+
             camera_names = cameras_by_detector.get(detector_name, [])
+            num_workers = detector_config.num_workers
+
+            # ONE shared queue for every worker of this detector -- every camera routed
+            # to this detector puts onto the SAME queue regardless of num_workers, and
+            # every worker process blocks on .get() against that SAME queue. This is
+            # what gives free least-busy-worker routing (see self.detection_queues's
+            # own docstring): whichever worker is idle and calls .get() first wins the
+            # next request, so a worker that just finished naturally picks up more work
+            # before a still-busy sibling does -- no queue-depth polling needed.
             queue = mp.Queue()
             self.detection_queues[detector_name] = queue
-            process = DetectorProcess(
-                detector_config=detector_config, detection_queue=queue, camera_names=camera_names,
-                detector_pub_addr=self.detector_pub_addr, stop_event=self.stop_event,
-            )
-            process.start()
-            self.detector_processes[detector_name] = process
+
+            for worker_index in range(num_workers):
+                worker_key = detector_name if num_workers == 1 else f"{detector_name}#{worker_index}"
+                # Every worker gets the FULL camera_names list -- not a subset -- purely
+                # so each worker pre-creates every routed camera's output SHM segment on
+                # startup (detector_process_main's own one-time setup loop). Which
+                # worker actually SERVES a given request is decided per-request by the
+                # shared queue above, not by this list.
+                process = DetectorProcess(
+                    detector_config=detector_config, detection_queue=queue, camera_names=camera_names,
+                    detector_pub_addr=self.detector_pub_addr, stop_event=self.stop_event,
+                )
+                process.start()
+                self.detector_processes[worker_key] = process
+
+            if num_workers > 1:
+                logger.info(
+                    "detector %r: %d worker process(es) sharing one queue, serving cameras %s",
+                    detector_name, num_workers, camera_names,
+                )
 
     def _start_openvocab(self) -> None:
-        """Only spawns OpenVocabProcess if at least one enabled query exists -- see
-        __init__'s docstring on self.openvocab_dispatcher for why this is conditional.
+        """Only spawns OpenVocabProcess if config.openvocab_enabled AND at least one
+        enabled query exists -- see __init__'s docstring on self.openvocab_dispatcher
+        for why this is conditional. openvocab_enabled is checked FIRST and is a hard
+        override: it lets queries stay configured/saved (not disabled/deleted one by
+        one) while still keeping the ~600MB OWLv2 model out of memory entirely, e.g.
+        via the Config page's toggle.
         """
+        if not self.config.openvocab_enabled:
+            logger.info("openvocab: disabled via config, skipping OWLv2 process startup")
+            return
+
         active_queries = [q for q in self.config.queries if q.enabled]
         if not active_queries:
             logger.info("openvocab: no enabled queries configured, skipping OWLv2 process startup")
@@ -202,6 +293,33 @@ class MirageApp:
         )
         logger.info("openvocab: started (device=%s), %d enabled quer%s", device, len(active_queries), "y" if len(active_queries) == 1 else "ies")
 
+    def _start_species_worker(self) -> None:
+        """Only spawns SpeciesProcess if config.species_classifier.enabled -- see
+        __init__'s docstring on self.species_dispatcher for why this is conditional.
+        Must run AFTER self.event_processor is constructed (in __init__) but assigns
+        into it here, post-construction -- EventProcessor itself has no species-related
+        constructor param, since whether species classification is available isn't
+        known until config is loaded in start(), well after __init__ already ran.
+        """
+        species_config = self.config.species_classifier
+        if not species_config.enabled:
+            logger.info("species: classifier not enabled, skipping species worker startup")
+            return
+
+        self.species_request_queue = mp.Queue()
+        self.species_result_queue = mp.Queue()
+        self.species_process = SpeciesProcess(
+            request_queue=self.species_request_queue, result_queue=self.species_result_queue,
+            stop_event=self.stop_event, classifier_config=species_config,
+        )
+        self.species_process.start()
+        self.species_dispatcher = SpeciesDispatcher(
+            request_queue=self.species_request_queue, result_queue=self.species_result_queue,
+            activity_log_queue=self.activity_log_queue,
+        )
+        self.event_processor.species_dispatcher = self.species_dispatcher
+        logger.info("species: started (device=%s)", species_config.device)
+
     def _start_record_process(self) -> None:
         self.record_thread = threading.Thread(target=self._record_loop, daemon=True, name="record-maintainer")
         self.record_thread.start()
@@ -213,6 +331,13 @@ class MirageApp:
     def _start_cameras(self) -> None:
         for camera in self.config.cameras.values():
             if not camera.enabled:
+                continue
+            detector_config = self.config.detectors.get(camera.detector)
+            if detector_config is None or not detector_config.enabled:
+                # No SHM ring, no detection queue, no DetectorProcess exists for this
+                # camera (see _preallocate_camera_shm/_start_detectors) -- starting a
+                # CameraTracker here would crash looking any of those up. Already
+                # logged once in _start_detectors.
                 continue
             self._start_camera(camera)
 
@@ -240,6 +365,7 @@ class MirageApp:
             detection_queue=self.detection_queues[camera.detector],
             detector_sub_addr=self.detector_sub_addr, frame_queue=frame_queue,
             detected_frames_queue=self.detected_frames_queue, stop_event=self.stop_event,
+            activity_log_queue=self.activity_log_queue,
         )
         tracker.start()
         self.tracker_processes[camera.name] = tracker
@@ -267,21 +393,29 @@ class MirageApp:
         return resp.content
 
     def _register_watchdog_targets(self) -> None:
-        for detector_name, process in self.detector_processes.items():
+        for worker_key, process in self.detector_processes.items():
+            # worker_key is "detector_name" (num_workers==1) or "detector_name#N"
+            # (num_workers>1) -- strip any "#N" suffix to recover the real detector
+            # name this worker belongs to (see _start_detectors's own worker_key
+            # construction). Every worker of a detector shares that SAME detector's
+            # config and queue (see self.detection_queues's own docstring), so no
+            # per-worker camera list needs to be tracked separately here.
+            detector_name = worker_key.split("#", 1)[0]
             detector_config = self.config.detectors[detector_name]
             camera_names = [c.name for c in self.config.cameras.values() if c.enabled and c.detector == detector_name]
+            queue = self.detection_queues[detector_name]
 
-            def factory(dc=detector_config, cn=camera_names, dq=self.detection_queues[detector_name]):
+            def factory(dc=detector_config, cn=camera_names, dq=queue):
                 return DetectorProcess(
                     detector_config=dc, detection_queue=dq, camera_names=cn,
                     detector_pub_addr=self.detector_pub_addr, stop_event=self.stop_event,
                 )
 
-            self.watchdog.register(f"detector:{detector_name}", process, factory, self._on_detector_restarted(detector_name))
+            self.watchdog.register(f"detector:{worker_key}", process, factory, self._on_detector_restarted(worker_key))
 
-    def _on_detector_restarted(self, detector_name: str):
+    def _on_detector_restarted(self, worker_key: str):
         def callback(new_process):
-            self.detector_processes[detector_name] = new_process
+            self.detector_processes[worker_key] = new_process
         return callback
 
     # ------------------------------------------------------------------
@@ -372,6 +506,39 @@ class MirageApp:
                     self.openvocab_dispatcher.forget_object(ended_id)
                 previous_ids_by_camera[camera_name] = current_ids
 
+            # Species dispatch itself already happened synchronously inside
+            # EventProcessor._on_start above (at Event-creation time) -- this is just
+            # draining whatever results the SpeciesProcess worker has finished since
+            # the last iteration, same non-blocking-poll shape as every other queue
+            # drained in this loop. Not camera-specific (a single shared worker serves
+            # every camera's Animal/Bird events), so this runs once per loop
+            # iteration regardless of which camera's frame just came through.
+            if self.species_dispatcher is not None:
+                try:
+                    self.species_dispatcher.drain_results()
+                except Exception:
+                    logger.exception("error draining species classification results")
+
+            self._drain_activity_log()
+
+    def _drain_activity_log(self) -> None:
+        """Non-blocking drain of every LogEvent any pipeline process/thread has put
+        onto activity_log_queue since the last iteration -- see this class's
+        activity_log_queue docstring and mirage.logging_bus's module docstring for why
+        only this loop ever touches ActivityLogWriter.
+        """
+        while True:
+            try:
+                event: LogEvent = self.activity_log_queue.get_nowait()
+            except queue_module.Empty:
+                break
+            except (OSError, EOFError):
+                break
+            try:
+                self.activity_log_writer.append(event)
+            except Exception:
+                logger.exception("error appending to activity log")
+
     # ------------------------------------------------------------------
     # Shutdown
     # ------------------------------------------------------------------
@@ -407,6 +574,12 @@ class MirageApp:
             if self.openvocab_process.is_alive():
                 self.openvocab_process.terminate()
                 self.openvocab_process.join(timeout=5)
+
+        if self.species_process is not None:
+            self.species_process.join(timeout=15)
+            if self.species_process.is_alive():
+                self.species_process.terminate()
+                self.species_process.join(timeout=5)
 
         if self.record_thread is not None:
             self.record_thread.join(timeout=10)

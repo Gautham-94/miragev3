@@ -14,14 +14,21 @@ import string
 from mirage.config.schema import CameraConfig
 from mirage.const import EVENT_SNAPSHOT_DIR
 from mirage.db.models import Event
+from mirage.logging_bus import LogEvent
 from mirage.tracking.tracker import TrackedObjectState
-from mirage.util.thumbnail import ThumbnailFetcher, capture_thumbnail, write_clean_snapshot
+from mirage.util.thumbnail import ThumbnailFetcher, capture_thumbnail, crop_jpeg_to_box, write_clean_snapshot
 from mirage.util.time import utc_from_timestamp, utcnow
 
 logger = logging.getLogger(__name__)
 
 UPDATE_PUBLISH_THROTTLE_SECONDS = 5.0
 HEARTBEAT_FORCE_SECONDS = 60.0
+
+# Mirage V3: only these labels are ever pushed to the (optional) species classifier --
+# Person/Vehicle events are never enrichable, so they're stamped "not_applicable" once
+# at creation and never touched again. Deliberately a fixed constant, not user-facing
+# config -- see NVR V3 architecture doc / species classification plan.
+SPECIES_ENRICHABLE_LABELS = frozenset({"animal", "bird"})
 
 
 def _event_id(start_time: float) -> str:
@@ -64,6 +71,25 @@ class EventProcessor:
         self._previous_ids_by_camera: dict[str, set[str]] = {}
         self.thumbnail_fetcher = thumbnail_fetcher
         self.thumb_dir = thumb_dir
+        # Set by MirageApp AFTER construction, once _start_species_worker() has decided
+        # whether a species classifier is configured/enabled -- see mirage.app.MirageApp
+        # for why this can't be passed in at __init__ time (EventProcessor is
+        # constructed before the species worker is started). None means "no species
+        # classification available," in which case _on_start skips dispatch entirely
+        # and stamps species_status="skipped" instead of "pending".
+        self.species_dispatcher = None
+        # Set by MirageApp AFTER construction, same as species_dispatcher above -- an
+        # mp.Queue for the Logs page (see mirage.logging_bus). None (e.g. in tests that
+        # construct EventProcessor directly) means logging is silently skipped.
+        self.activity_log_queue = None
+
+    def _log(self, category: str, message: str, camera_name: str | None = None) -> None:
+        if self.activity_log_queue is None:
+            return
+        try:
+            self.activity_log_queue.put_nowait(LogEvent(category=category, message=message, camera=camera_name))
+        except Exception:
+            pass  # log queue backpressure/full -- never let logging affect event processing
 
     def process(
         self,
@@ -149,6 +175,26 @@ class EventProcessor:
         else:
             snapshot_path = capture_thumbnail(self.thumbnail_fetcher, self.thumb_dir, event_id, camera.name)
             snapshot_boxes = []
+
+        # Mirage V3 async species classification: Person/Vehicle/etc. are never
+        # enrichable (species_status stays "not_applicable" forever, matching the
+        # design doc's "species classification only for detected animals"). Animal/Bird
+        # events get "pending" IF a crop is actually dispatched below, else "skipped"
+        # (no species_dispatcher configured, or no frame_jpeg to crop from -- e.g. the
+        # capture_thumbnail live-fetch fallback path has no synchronously-available
+        # frame to crop). Detection/tracking/recording/alerting are never blocked on
+        # any of this -- the Event row above is already fully created and reviewable.
+        species_enrichable = state.label in SPECIES_ENRICHABLE_LABELS
+        species_status = "not_applicable"
+        if species_enrichable:
+            species_status = "skipped"
+            if self.species_dispatcher is not None and frame_jpeg is not None:
+                crop_jpeg = crop_jpeg_to_box(frame_jpeg, state.box)
+                if crop_jpeg is not None:
+                    self.species_dispatcher.dispatch(event_id, camera.name, state.label, crop_jpeg)
+                    species_status = "pending"
+                    self._log("species", f"{state.label} image queued for species classification", camera.name)
+
         self._active[obj_id] = {
             "event_id": event_id,
             "last_published": frame_time,
@@ -175,9 +221,18 @@ class EventProcessor:
             false_positive=state.is_false_positive,
             has_snapshot=snapshot_path is not None,
             snapshot_path=snapshot_path,
-            data={"box": list(state.box), "snapshot_boxes": snapshot_boxes},
+            data={
+                "box": list(state.box),
+                "snapshot_boxes": snapshot_boxes,
+                "species": None,
+                "species_status": species_status,
+                "species_confidence": None,
+                "species_taxonomy": None,
+                "species_model": None,
+            },
         )
         logger.debug("%s: event %s started for %s", camera.name, event_id, state.label)
+        self._log("detect", f"{state.label} detected", camera.name)
 
     def _on_update(self, camera: CameraConfig, obj_id: str, state: TrackedObjectState, frame_time: float) -> None:
         entry = self._active.get(obj_id)
@@ -204,18 +259,34 @@ class EventProcessor:
             return
 
         entry["last_published"] = frame_time
+
+        # Event.update(data=...) REPLACES the whole JSON field -- writing {"box": ...,
+        # "snapshot_boxes": ...} alone would silently wipe out any OTHER key already in
+        # `data`. This used to only matter for snapshot_boxes (real bug caught live: a
+        # fresh Event's snapshot_boxes was present at creation, then gone by the time
+        # the object's track ended). Mirage V3 makes this a live hazard for a second,
+        # more subtle reason: the (optional) SpeciesDispatcher can write species/
+        # species_status/species_confidence/species_taxonomy into this SAME row, at ANY
+        # time, from a completely different call site (mirage.species.dispatcher,
+        # draining results in the main-process result-consumer loop) -- fully
+        # asynchronously with respect to this throttled update. `entry` only ever holds
+        # a stale snapshot of species fields from _on_start time (never updated after),
+        # so re-including entry's copy here (the way snapshot_boxes does) would
+        # RE-CLOBBER a genuine just-completed species classification back to
+        # "pending"/None. The only correct fix is read-modify-write off the CURRENT row
+        # instead of a blind literal -- read whatever is in the DB right now, overlay
+        # just the fields this call owns (box/snapshot_boxes), and write the merged
+        # result back, leaving any species_* keys exactly as the species dispatcher
+        # last left them.
+        current = Event.get_or_none(Event.id == entry["event_id"])
+        current_data = dict(current.data) if current is not None and current.data else {}
+        current_data["box"] = list(state.box)
+        current_data["snapshot_boxes"] = entry["snapshot_boxes"]
         Event.update(
             score=state.score,
             top_score=top_score,
             false_positive=state.is_false_positive,
-            # snapshot_boxes MUST be re-included verbatim (from entry, set once at
-            # _on_start, never recomputed) here -- Event.update(data=...) REPLACES the
-            # whole JSON field, so writing {"box": ...} alone would silently wipe out
-            # snapshot_boxes on the very first throttled/heartbeat update after
-            # creation. Real bug caught live: a fresh Event's snapshot_boxes was
-            # present immediately after creation, then gone by the time the object's
-            # track ended, because this exact call overwrote it with a box-only dict.
-            data={"box": list(state.box), "snapshot_boxes": entry["snapshot_boxes"]},
+            data=current_data,
         ).where(Event.id == entry["event_id"]).execute()
 
     def _should_update_db(self, previous_top_score: float, top_score: float, elapsed: float) -> bool:

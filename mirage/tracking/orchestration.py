@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Callable
 
 import numpy as np
 
@@ -21,6 +22,12 @@ from mirage.tracking.lifecycle import ObjectLifecycle, is_object_filtered
 from mirage.tracking.tracker import ObjectTracker, TrackedObjectState
 
 logger = logging.getLogger(__name__)
+
+# Mirage V3 PTZ hybrid scheduling: while a PTZ camera is actively moving, direct-sample
+# the whole frame to the detector at roughly this rate instead of the normal
+# motion-gated region pipeline -- see CameraOrchestrator.process_frame's ptz_moving
+# branch and the V3 architecture doc's "Sample at 1-2 FPS" PTZ design.
+PTZ_SAMPLE_INTERVAL_SECONDS = 1.0 / 1.5
 
 
 @dataclass
@@ -43,13 +50,36 @@ class CameraOrchestrator:
         motion_detector: MotionDetector,
         object_tracker: ObjectTracker,
         remote_detector: RemoteObjectDetector,
+        ptz_moving_fn: Callable[[], bool] | None = None,
+        log_fn: Callable[[str, str, str], None] | None = None,
     ) -> None:
+        """`ptz_moving_fn`, if given, is polled once per frame to decide whether this
+        camera is currently mid-PTZ-move -- see process_frame's ptz_moving branch.
+        None (the default, and the only option for every non-PTZ-enabled camera) means
+        this camera never bypasses the normal motion-gated pipeline, preserving the
+        exact pre-V3 control flow byte-for-byte (see mirage.tracking.camera_tracker.
+        camera_tracker_main, which only passes a real closure when camera.ptz.enabled).
+
+        `log_fn`, if given, is called as log_fn(category, message, camera_name) at a
+        handful of edge-triggered milestones (motion start/stop, an object newly
+        confirmed past Gate 1) for the Logs page -- see mirage.logging_bus. Deliberately
+        NOT called every frame (motion fires at 5-10fps while movement is present, which
+        would flood the log with noise); only on the transition. None (the default) is a
+        complete no-op, so a non-instrumented caller (e.g. existing tests) is unaffected.
+        """
         self.camera = camera
         self.motion_detector = motion_detector
         self.object_tracker = object_tracker
         self.remote_detector = remote_detector
+        self.ptz_moving_fn = ptz_moving_fn
+        self.log_fn = log_fn
         self._lifecycles: dict[str, ObjectLifecycle] = {}
+        self._was_in_motion = False
         self._startup_scan_done = False
+        # Last frame_time a direct whole-frame PTZ sample was taken -- see the
+        # ptz_moving branch in process_frame. Reset to -inf so the very first moving
+        # frame always samples immediately rather than waiting a full interval.
+        self._last_ptz_sample_time = float("-inf")
         # Boxes from last frame's consolidated detections that did NOT (yet) belong to a
         # CONFIRMED tracked object -- i.e. norfair candidates still inside their
         # initialization_delay warm-up window. Without carrying these forward as regions,
@@ -68,6 +98,34 @@ class CameraOrchestrator:
 
         # Step: motion detection, unconditional every frame (spec section 7 step 3).
         motion_boxes = self.motion_detector.detect(luma)
+
+        is_in_motion = bool(motion_boxes)
+        if self.log_fn is not None and is_in_motion != self._was_in_motion:
+            self.log_fn("motion", "motion started" if is_in_motion else "motion stopped", self.camera.name)
+        self._was_in_motion = is_in_motion
+
+        # Mirage V3 PTZ hybrid scheduling: while a PTZ camera is physically moving,
+        # motion-gated region selection is meaningless -- a tracked-object box or
+        # motion box computed before the pan/tilt started describes a location in the
+        # OLD field of view, which no longer corresponds to anything in this frame.
+        # Bypass build_regions() entirely and instead direct-sample the WHOLE frame to
+        # the detector at ~1-2 FPS (PTZ_SAMPLE_INTERVAL_SECONDS), the same rate the V3
+        # architecture doc specifies. Between samples, feed the tracker `detections=[]`
+        # (same mechanism camera.detect.enabled=False already uses below) so norfair's
+        # own max_disappeared ages out every pre-move track on its normal schedule --
+        # deliberate, not a bug: an object mid-track when a move starts simply
+        # disappears from tracked_objects the next frame, which EventProcessor's
+        # existing start/update/end diff already closes out correctly with zero
+        # changes needed. self.ptz_moving_fn is None for every non-PTZ camera, so this
+        # branch never triggers and control falls straight through to the unchanged
+        # motion-gated path below -- fixed cameras are completely unaffected.
+        if self.ptz_moving_fn is not None and self.ptz_moving_fn():
+            if frame_time - self._last_ptz_sample_time < PTZ_SAMPLE_INTERVAL_SECONDS:
+                tracked = self.object_tracker.update(frame_time, detections=[])
+                return FrameResult(self.camera.name, frame_time, tracked, motion_boxes=[], regions=[])
+            self._last_ptz_sample_time = frame_time
+            regions = [(0, 0, frame_shape[1], frame_shape[0])]
+            return self._detect_and_track(yuv_frame, frame_time, frame_shape, motion_boxes, regions)
 
         if not self.camera.detect.enabled:
             # Step: detection disabled -- tracker still runs so existing tracks age out.
@@ -95,6 +153,21 @@ class CameraOrchestrator:
             regions = [(0, 0, frame_shape[1], frame_shape[0])]
         self._startup_scan_done = True
 
+        return self._detect_and_track(yuv_frame, frame_time, frame_shape, motion_boxes, regions)
+
+    def _detect_and_track(
+        self,
+        yuv_frame: np.ndarray,
+        frame_time: float,
+        frame_shape: tuple[int, int],
+        motion_boxes: list[tuple[int, int, int, int]],
+        regions: list[tuple[int, int, int, int]],
+    ) -> FrameResult:
+        """The shared "run the detector over `regions`, consolidate, feed the tracker"
+        tail end of process_frame -- factored out so the PTZ direct-sample branch
+        (a single whole-frame region) and the normal motion-gated branch (build_regions()'s
+        clustered output) can share it without duplicating the detection loop.
+        """
         raw_detections: list[RawDetection] = []
         for region in regions:
             tensor = create_tensor_input(yuv_frame, frame_shape, self.remote_detector.model_config, region)

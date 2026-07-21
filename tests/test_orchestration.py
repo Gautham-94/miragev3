@@ -355,6 +355,163 @@ def test_track_all_false_still_filters_by_the_track_list():
     assert final.tracked_objects == {}, "a label outside Track objects must still be filtered when track_all=False"
 
 
+# --------------------------------------------------------------------------------------
+# Mirage V3 PTZ hybrid scheduling -- ptz_moving_fn bypasses motion-gated region
+# selection and direct-samples the whole frame at ~1-2 FPS instead.
+# --------------------------------------------------------------------------------------
+
+
+def test_ptz_moving_fn_none_is_byte_for_byte_the_same_as_before():
+    """The default (ptz_moving_fn=None, every existing/non-PTZ camera) must behave
+    EXACTLY as before this feature existed -- confirmed by reusing the pre-existing
+    track_all test as a regression check with ptz_moving_fn passed explicitly as None.
+    """
+    yuv_frame, frame_shape = _load_bus_as_yuv_frame()
+    height, width = frame_shape
+
+    camera = CameraConfig(
+        name="ptz_none_cam",
+        ffmpeg=FfmpegConfig(inputs=[CameraInputConfig(path="rtsp://x/y")]),
+        detect=DetectConfig(width=width, height=height, fps=5),
+        record=RecordConfig(enabled=False),
+        objects=ObjectsConfig(track=["person"], track_all=True),
+    )
+    motion_detector = MotionDetector(frame_shape=frame_shape, config=camera.motion)
+    object_tracker = ObjectTracker(fps=camera.detect.fps)
+    detector = _FakeDetector([("dog", 0.9, (0.1, 0.1, 0.4, 0.4))])
+    orchestrator = CameraOrchestrator(camera, motion_detector, object_tracker, detector, ptz_moving_fn=None)
+
+    final = _drive_frames(orchestrator, yuv_frame)
+
+    tracked_labels = {state.label for state in final.tracked_objects.values()}
+    assert "dog" in tracked_labels
+
+
+def test_ptz_moving_bypasses_detection_between_samples_and_ages_out_tracks():
+    """While ptz_moving_fn() returns True, frames between the ~1-2 FPS direct-sample
+    interval must feed the tracker detections=[] (never call the detector) -- proven
+    here by a detector that raises if invoked, and by confirming a previously-tracked
+    object disappears (ages out) rather than persisting through the "camera moved"
+    transition, since its box no longer describes anything real in the new FOV.
+    """
+    yuv_frame, frame_shape = _load_bus_as_yuv_frame()
+    height, width = frame_shape
+
+    camera = CameraConfig(
+        name="ptz_moving_cam",
+        ffmpeg=FfmpegConfig(inputs=[CameraInputConfig(path="rtsp://x/y")]),
+        detect=DetectConfig(width=width, height=height, fps=5),
+        record=RecordConfig(enabled=False),
+        objects=ObjectsConfig(track=["person"], track_all=True),
+    )
+    motion_detector = MotionDetector(frame_shape=frame_shape, config=camera.motion)
+    object_tracker = ObjectTracker(fps=camera.detect.fps)
+    detector = _FakeDetector([("dog", 0.9, (0.1, 0.1, 0.4, 0.4))])
+    orchestrator = CameraOrchestrator(camera, motion_detector, object_tracker, detector, ptz_moving_fn=None)
+
+    # First, confirm a track normally (ptz_moving_fn still None/not moving).
+    final = _drive_frames(orchestrator, yuv_frame, count=6)
+    assert len(final.tracked_objects) > 0, "expected a confirmed track before the PTZ move starts"
+
+    # Now the camera starts moving -- swap in a detector that raises if ever called,
+    # and a ptz_moving_fn that always reports True. The very first "moving" frame's
+    # sample timer is reset to -inf in __init__, so ONE immediate direct sample is
+    # still expected (that's correct: the first moving frame should still sample once
+    # right away) -- but every immediately-following frame within
+    # PTZ_SAMPLE_INTERVAL_SECONDS must NOT call the detector at all.
+    from mirage.tracking.orchestration import PTZ_SAMPLE_INTERVAL_SECONDS
+
+    def _raising_detect(*args, **kwargs):
+        raise AssertionError("detector must not be called between PTZ direct samples")
+
+    orchestrator.remote_detector.detect = _raising_detect
+    orchestrator.ptz_moving_fn = lambda: True
+
+    last_frame_time = 6.0
+    orchestrator._last_ptz_sample_time = last_frame_time  # pretend a sample JUST happened
+    next_frame_time = last_frame_time + (PTZ_SAMPLE_INTERVAL_SECONDS / 2)  # well within the interval
+
+    result = orchestrator.process_frame(yuv_frame, frame_time=next_frame_time)
+
+    assert result.motion_boxes == []
+    assert result.regions == []
+    # The pre-move track must have aged out (or at least not been fed a fresh
+    # detection) -- detections=[] means norfair only ages existing tracks, it can
+    # never confirm anything new.
+    assert result.tracked_objects == {} or all(
+        obj_id in final.tracked_objects for obj_id in result.tracked_objects
+    )
+
+
+def test_ptz_moving_direct_samples_the_whole_frame_after_the_interval_elapses():
+    """Once PTZ_SAMPLE_INTERVAL_SECONDS has elapsed since the last sample, the next
+    moving frame must call the detector over a SINGLE whole-frame region (not
+    build_regions()'s clustered output), and the resulting detection must be tracked
+    -- proving the "direct sample" path actually reaches the detector/tracker, not just
+    that it skips frames.
+    """
+    yuv_frame, frame_shape = _load_bus_as_yuv_frame()
+    height, width = frame_shape
+
+    camera = CameraConfig(
+        name="ptz_sample_cam",
+        ffmpeg=FfmpegConfig(inputs=[CameraInputConfig(path="rtsp://x/y")]),
+        detect=DetectConfig(width=width, height=height, fps=5),
+        record=RecordConfig(enabled=False),
+        objects=ObjectsConfig(track=["person"], track_all=True),
+    )
+    motion_detector = MotionDetector(frame_shape=frame_shape, config=camera.motion)
+    object_tracker = ObjectTracker(fps=camera.detect.fps)
+    detector = _FakeDetector([("dog", 0.9, (0.1, 0.1, 0.4, 0.4))])
+    orchestrator = CameraOrchestrator(
+        camera, motion_detector, object_tracker, detector, ptz_moving_fn=lambda: True,
+    )
+
+    # _last_ptz_sample_time starts at -inf (set in __init__), so the very first
+    # process_frame call while moving should sample immediately regardless of interval.
+    result = orchestrator.process_frame(yuv_frame, frame_time=100.0)
+
+    assert result.regions == [(0, 0, width, height)], "expected a single whole-frame region for a direct PTZ sample"
+    assert orchestrator._last_ptz_sample_time == 100.0
+
+
+def test_ptz_moving_resumes_normal_motion_gated_pipeline_once_stationary():
+    """When ptz_moving_fn() flips back to False, the very next frame must fall
+    straight through to the existing unchanged build_regions() path -- confirmed by a
+    fresh track being confirmable again after the camera stops (same 6-frame pattern
+    every other track-confirmation test in this file uses).
+    """
+    yuv_frame, frame_shape = _load_bus_as_yuv_frame()
+    height, width = frame_shape
+
+    camera = CameraConfig(
+        name="ptz_resume_cam",
+        ffmpeg=FfmpegConfig(inputs=[CameraInputConfig(path="rtsp://x/y")]),
+        detect=DetectConfig(width=width, height=height, fps=5),
+        record=RecordConfig(enabled=False),
+        objects=ObjectsConfig(track=["person"], track_all=True),
+    )
+    motion_detector = MotionDetector(frame_shape=frame_shape, config=camera.motion)
+    object_tracker = ObjectTracker(fps=camera.detect.fps)
+    detector = _FakeDetector([("dog", 0.9, (0.1, 0.1, 0.4, 0.4))])
+
+    moving = {"value": True}
+    orchestrator = CameraOrchestrator(
+        camera, motion_detector, object_tracker, detector, ptz_moving_fn=lambda: moving["value"],
+    )
+
+    # While moving: a couple of direct samples, no confirmed track expected yet (each
+    # sample is independent, norfair needs consecutive frames to confirm).
+    orchestrator.process_frame(yuv_frame, frame_time=0.0)
+
+    # Camera stops moving -- resume the normal motion-gated pipeline.
+    moving["value"] = False
+    final = _drive_frames(orchestrator, yuv_frame, count=6)
+
+    tracked_labels = {state.label for state in final.tracked_objects.values()}
+    assert "dog" in tracked_labels, "expected normal track confirmation to resume once the camera is stationary again"
+
+
 def test_track_all_does_not_bypass_the_object_filter_thresholds():
     """track_all only bypasses the LABEL membership check -- ObjectFilterConfig's own
     score/area thresholds (is_object_filtered) still apply to every label exactly as

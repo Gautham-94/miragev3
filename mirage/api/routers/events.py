@@ -20,6 +20,9 @@ def list_events(
     after: float | None = Query(None, description="epoch seconds, inclusive lower bound on start_time"),
     before: float | None = Query(None, description="epoch seconds, exclusive upper bound on start_time"),
     include_false_positive: bool = Query(False, description="include events still flagged false_positive"),
+    species_status: str | None = Query(
+        None, description="filter by species classification status: pending/complete/failed/skipped/not_applicable",
+    ),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
 ) -> list[EventOut]:
@@ -34,6 +37,12 @@ def list_events(
         query = query.where(Event.start_time < utc_from_timestamp(before))
     if not include_false_positive:
         query = query.where(Event.false_positive == False)  # noqa: E712 -- peewee expression, not a Python bool check
+    if species_status is not None:
+        # Event.data is a JSONField (playhouse.sqlite_ext) -- this expression compiles to
+        # a SQLite json_extract() comparison, no schema migration needed since
+        # species_status lives inside the JSON blob, not a real column (see
+        # mirage.events.processor.EventProcessor._on_start / mirage.api.schemas.EventOut).
+        query = query.where(Event.data["species_status"] == species_status)
 
     query = query.order_by(Event.start_time.desc()).limit(limit).offset(offset)
     return [EventOut.from_model(e) for e in query]

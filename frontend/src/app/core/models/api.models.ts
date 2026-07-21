@@ -13,6 +13,11 @@ export interface Camera {
   track_all: boolean;
 }
 
+// Mirage V3 async species classification (mirage/species/, mirage/events/processor.py)
+// -- 'not_applicable' for every label other than animal/bird; 'pending' until the
+// species worker enriches the event, then 'complete'/'failed'/'skipped'.
+export type SpeciesStatus = 'not_applicable' | 'pending' | 'complete' | 'failed' | 'skipped';
+
 export interface Event {
   id: string;
   camera: string;
@@ -26,6 +31,10 @@ export interface Event {
   zones: string[];
   has_clip: boolean;
   has_snapshot: boolean;
+  species: string | null;
+  species_status: SpeciesStatus;
+  species_confidence: number | null;
+  species_taxonomy: Record<string, unknown> | null;
 }
 
 export interface Recording {
@@ -62,6 +71,7 @@ export interface EventListParams {
   after?: number;
   before?: number;
   include_false_positive?: boolean;
+  species_status?: SpeciesStatus;
   limit?: number;
   offset?: number;
 }
@@ -105,6 +115,9 @@ export interface Detector {
   execution_provider: ExecutionProvider;
   model_path: string;
   labelmap_path: string;
+  enabled: boolean;
+  cameras: string[];
+  num_workers: number;
 }
 
 export interface DetectorWriteRequest {
@@ -118,6 +131,8 @@ export interface DetectorWriteRequest {
   pixel_format?: 'rgb' | 'bgr';
   layout?: 'nhwc' | 'nchw';
   execution_provider?: ExecutionProvider;
+  enabled?: boolean;
+  num_workers?: number;
 }
 
 export type RtspTransport = 'tcp' | 'udp';
@@ -205,6 +220,20 @@ export interface QueryWriteRequest {
   text: string;
   cameras?: string[];
   enabled?: boolean;
+}
+
+export type LogCategory = 'motion' | 'detect' | 'species' | 'system';
+
+export interface LogEntry {
+  timestamp: number;
+  category: LogCategory;
+  message: string;
+  camera: string | null;
+}
+
+export interface SystemCapabilities {
+  cpu_count: number;
+  total_memory_mb: number;
 }
 
 export interface QueryMatch {

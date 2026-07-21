@@ -42,9 +42,19 @@ class EventOut(BaseModel):
     zones: list[str]
     has_clip: bool
     has_snapshot: bool
+    # Mirage V3 async species classification (mirage/species/, mirage/events/processor.py)
+    # -- all read out of Event.data, not real columns (see mirage.db.models.Event.data's
+    # own comment: "box, region, attributes, path history, max_severity, etc." are
+    # expected to live there). species_status is always present ("not_applicable" for
+    # Person/Vehicle/etc., "pending"/"complete"/"failed"/"skipped" for Animal/Bird).
+    species: str | None = None
+    species_status: str = "not_applicable"
+    species_confidence: float | None = None
+    species_taxonomy: dict | None = None
 
     @classmethod
     def from_model(cls, event) -> "EventOut":
+        data = event.data or {}
         return cls(
             id=event.id,
             camera=event.camera,
@@ -58,6 +68,10 @@ class EventOut(BaseModel):
             zones=event.zones or [],
             has_clip=event.has_clip,
             has_snapshot=event.has_snapshot,
+            species=data.get("species"),
+            species_status=data.get("species_status", "not_applicable"),
+            species_confidence=data.get("species_confidence"),
+            species_taxonomy=data.get("species_taxonomy"),
         )
 
 

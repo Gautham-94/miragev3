@@ -68,6 +68,19 @@ def get_review_segment_clip(segment_id: str, request: Request) -> FileResponse:
     for tests -- see create_app) keyed by segment id -- a segment's time window and its
     underlying recordings are immutable once the segment has ended, so a second request
     for the same segment reuses the already-stitched file rather than re-running ffmpeg.
+
+    Deliberately does NOT pass filename=... to FileResponse -- that makes Starlette set
+    Content-Disposition: attachment, which tells the browser to treat the response as a
+    download rather than inline media. This single endpoint backs BOTH the review page's
+    inline <video src=...> playback AND its separate download link (see
+    frontend's video-lightbox.html: [videoUrl] and [downloadUrl] both point at this same
+    URL) -- attachment broke inline playback (confirmed live: the <video> element never
+    left its loading spinner despite the underlying HTTP request succeeding with a real
+    200/206 and a valid, ffprobe-clean H.264/AAC file) while leaving the download link
+    working, which is exactly what attachment is designed to do and why the bug was easy
+    to miss from the download side alone. The download link's own HTML `download`
+    attribute already fully handles the "save as" filename/behavior without needing the
+    server to set Content-Disposition at all.
     """
     seg = ReviewSegment.get_or_none(ReviewSegment.id == segment_id)
     if seg is None:
@@ -77,7 +90,7 @@ def get_review_segment_clip(segment_id: str, request: Request) -> FileResponse:
 
     dest_path = Path(request.app.state.export_dir) / "review_clips" / f"{segment_id}.mp4"
     if dest_path.exists():
-        return FileResponse(dest_path, media_type="video/mp4", filename=dest_path.name)
+        return FileResponse(dest_path, media_type="video/mp4")
 
     recordings = recordings_overlapping(seg.camera, seg.start_time, seg.end_time)
     if not recordings:
@@ -91,4 +104,4 @@ def get_review_segment_clip(segment_id: str, request: Request) -> FileResponse:
     if not ok:
         raise HTTPException(status_code=500, detail="failed to stitch recordings for this review segment")
 
-    return FileResponse(dest_path, media_type="video/mp4", filename=dest_path.name)
+    return FileResponse(dest_path, media_type="video/mp4")

@@ -18,6 +18,8 @@ from mirage.config.schema import (
     FfmpegConfig,
     MirageConfig,
     ModelConfig,
+    PtzConfig,
+    PtzPresetConfig,
 )
 from mirage.db.database import close_database, init_database
 from mirage.db.models import AppConfig
@@ -72,6 +74,44 @@ def test_save_to_db_then_from_db_round_trips_a_camera(db):
 
     assert "front_door" in reloaded.cameras
     assert reloaded.cameras["front_door"].ffmpeg.inputs[0].path == "rtsp://127.0.0.1/front_door"
+
+
+def test_camera_ptz_config_defaults_to_disabled():
+    """A camera with no ptz config at all must behave exactly as before this feature
+    existed -- ptz.enabled=False is the default, so no PTZ polling thread/orchestration
+    branch is ever engaged unless explicitly opted in.
+    """
+    camera = CameraConfig(
+        name="front_door", ffmpeg=FfmpegConfig(inputs=[CameraInputConfig(path="rtsp://127.0.0.1/front_door")]),
+    )
+    assert camera.ptz.enabled is False
+    assert camera.ptz.patrol_presets == []
+
+
+def test_save_to_db_then_from_db_round_trips_ptz_config(db):
+    config = MirageConfig.from_db()
+    config.cameras["ptz_cam"] = CameraConfig(
+        name="ptz_cam",
+        ffmpeg=FfmpegConfig(inputs=[CameraInputConfig(path="rtsp://127.0.0.1/ptz_cam")]),
+        detector="general",
+        ptz=PtzConfig(
+            enabled=True, onvif_host="192.168.1.50", onvif_port=8080,
+            onvif_username="admin", onvif_password="hunter2",
+            patrol_enabled=True, patrol_presets=[PtzPresetConfig(token="1", name="Gate")],
+            patrol_interval_seconds=120,
+        ),
+    )
+
+    config.save_to_db()
+    reloaded = MirageConfig.from_db()
+
+    ptz = reloaded.cameras["ptz_cam"].ptz
+    assert ptz.enabled is True
+    assert ptz.onvif_host == "192.168.1.50"
+    assert ptz.onvif_port == 8080
+    assert ptz.patrol_enabled is True
+    assert ptz.patrol_presets == [PtzPresetConfig(token="1", name="Gate")]
+    assert ptz.patrol_interval_seconds == 120
 
 
 def test_save_to_db_overwrites_previous_save_not_duplicates_row(db):

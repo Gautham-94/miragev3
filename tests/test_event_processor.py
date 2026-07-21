@@ -411,6 +411,128 @@ def test_multiple_cameras_tracked_independently(db):
     assert Event.select().where(Event.camera == "cam2").count() == 1
 
 
+# --------------------------------------------------------------------------------------
+# Mirage V3 async species classification -- Event.data species_* defaults, dispatch
+# gating (animal/bird only), and the _on_update read-modify-write race fix.
+# --------------------------------------------------------------------------------------
+
+
+def test_person_event_species_status_is_not_applicable(db):
+    processor = EventProcessor()
+    camera = _camera()
+    state = _state("obj1", "person", 0.9, frame_time=100.0)
+
+    processor.process(camera, 100.0, {"obj1": state})
+
+    row = Event.select().get()
+    assert row.data["species_status"] == "not_applicable"
+    assert row.data["species"] is None
+
+
+def test_animal_event_with_no_dispatcher_is_skipped_not_pending(db):
+    processor = EventProcessor()
+    camera = _camera()
+    state = _state("obj1", "animal", 0.9, frame_time=100.0)
+
+    processor.process(camera, 100.0, {"obj1": state}, frame_jpeg=_real_jpeg())
+
+    row = Event.select().get()
+    assert row.data["species_status"] == "skipped"
+
+
+def test_animal_event_without_frame_jpeg_is_skipped(db):
+    """No synchronously-available frame to crop (e.g. the capture_thumbnail live-fetch
+    fallback path) -- can't dispatch, so species_status must be "skipped", not stuck
+    claiming "pending" forever with nothing ever going to complete it.
+    """
+    processor = EventProcessor()
+    camera = _camera()
+    state = _state("obj1", "bird", 0.9, frame_time=100.0)
+
+    processor.process(camera, 100.0, {"obj1": state}, frame_jpeg=None)
+
+    row = Event.select().get()
+    assert row.data["species_status"] == "skipped"
+
+
+def test_animal_event_with_dispatcher_dispatches_a_crop_and_is_pending(db):
+    dispatched = []
+
+    class FakeDispatcher:
+        def dispatch(self, event_id, camera_name, label, crop_jpeg):
+            dispatched.append((event_id, camera_name, label, crop_jpeg))
+
+    processor = EventProcessor()
+    processor.species_dispatcher = FakeDispatcher()
+    camera = _camera()
+    state = _state("obj1", "animal", 0.9, box=(10.0, 10.0, 50.0, 60.0), frame_time=100.0)
+
+    processor.process(camera, 100.0, {"obj1": state}, frame_jpeg=_real_jpeg())
+
+    row = Event.select().get()
+    assert row.data["species_status"] == "pending"
+    assert len(dispatched) == 1
+    event_id, camera_name, label, crop_jpeg = dispatched[0]
+    assert event_id == row.id
+    assert camera_name == "cam1"
+    assert label == "animal"
+    assert crop_jpeg  # non-empty encoded jpeg bytes
+
+
+def test_person_event_never_dispatches_even_with_a_dispatcher_configured(db):
+    dispatched = []
+
+    class FakeDispatcher:
+        def dispatch(self, event_id, camera_name, label, crop_jpeg):
+            dispatched.append(event_id)
+
+    processor = EventProcessor()
+    processor.species_dispatcher = FakeDispatcher()
+    camera = _camera()
+    state = _state("obj1", "person", 0.9, frame_time=100.0)
+
+    processor.process(camera, 100.0, {"obj1": state}, frame_jpeg=_real_jpeg())
+
+    assert dispatched == []
+    row = Event.select().get()
+    assert row.data["species_status"] == "not_applicable"
+
+
+def test_species_fields_survive_a_later_throttled_update(db):
+    """The core race this fix closes: Event.update(data=...) in _on_update must be a
+    read-modify-write off the CURRENT row, not a blind literal -- otherwise a
+    throttled/heartbeat update landing AFTER the species worker has already stamped a
+    real classification onto this row would silently wipe it back to pending/None.
+    """
+    processor = EventProcessor()
+    camera = _camera()
+
+    state1 = _state("obj1", "animal", 0.5, box=(10.0, 10.0, 50.0, 60.0), frame_time=100.0, is_false_positive=False)
+    processor.process(camera, 100.0, {"obj1": state1}, frame_jpeg=_real_jpeg())
+
+    row = Event.select().where(Event.camera == "cam1").get()
+    event_id = row.id
+
+    # Simulate the species worker completing asynchronously, via its own read-modify-
+    # write Event.update() (mirrors mirage.species.dispatcher's real implementation).
+    completed_row = Event.get(Event.id == event_id)
+    merged = {**completed_row.data, "species": "Odocoileus virginianus", "species_status": "complete", "species_confidence": 0.93}
+    Event.update(data=merged).where(Event.id == event_id).execute()
+
+    # Now a throttled/heartbeat EventProcessor update fires for the SAME event (higher
+    # score forces an immediate write past the throttle window) -- this must NOT
+    # clobber the species fields just written above.
+    state2 = _state("obj1", "animal", 0.95, box=(400.0, 300.0, 450.0, 350.0), frame_time=100.5, is_false_positive=False)
+    processor.process(camera, 100.5, {"obj1": state2})
+
+    row_after = Event.get(Event.id == event_id)
+    assert row_after.data["species"] == "Odocoileus virginianus"
+    assert row_after.data["species_status"] == "complete"
+    assert row_after.data["species_confidence"] == 0.93
+    assert row_after.top_score == 0.95  # the actual box/score update DID apply
+    assert row_after.data["snapshot_boxes"] == row.data["snapshot_boxes"]  # unchanged, per existing behavior
+
+
 def test_close_dangling_events_on_startup(db):
     import datetime
 

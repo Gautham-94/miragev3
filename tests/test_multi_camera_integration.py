@@ -188,3 +188,88 @@ def test_two_cameras_share_one_detector_process(two_video_servers, app_environme
         assert not capture.is_alive()
     for detector in app.detector_processes.values():
         assert not detector.is_alive()
+
+
+def test_two_cameras_split_across_two_detector_workers(two_video_servers, app_environment):
+    """DetectorInstanceConfig.num_workers=2 with 2 cameras routed to that detector must
+    spawn TWO independent DetectorProcess instances (not one shared process, the
+    opposite of test_two_cameras_share_one_detector_process above) -- each camera
+    statically assigned to its own worker/queue, added specifically to fix the real
+    single-consumer bottleneck confirmed this session (one shared detector process
+    serializes inference across every routed camera; see DetectorInstanceConfig.
+    num_workers's own docstring).
+    """
+    stream_url_1, stream_url_2 = two_video_servers
+    tmp = app_environment
+
+    camera1 = CameraConfig(
+        name="cam1",
+        ffmpeg=FfmpegConfig(inputs=[CameraInputConfig(path=stream_url_1, retry_interval=2.0)]),
+        detect=DetectConfig(width=640, height=480, fps=10),
+        record=RecordConfig(enabled=True, continuous=RetainConfig(days=1)),
+        objects=ObjectsConfig(track=["person", "car", "bus", "clock"]),
+        detector="shared",
+    )
+    camera2 = CameraConfig(
+        name="cam2",
+        ffmpeg=FfmpegConfig(inputs=[CameraInputConfig(path=stream_url_2, retry_interval=2.0)]),
+        detect=DetectConfig(width=640, height=480, fps=10),
+        record=RecordConfig(enabled=True, continuous=RetainConfig(days=1)),
+        objects=ObjectsConfig(track=["person", "car", "bus", "clock"]),
+        detector="shared",
+    )
+    detector_config = DetectorInstanceConfig(
+        name="shared",
+        model=ModelConfig(
+            width=320, height=320, input_dtype=InputDType.int_, pixel_format=PixelFormat.rgb,
+            model_path=str(MODEL_PATH), labelmap_path=str(LABELMAP_PATH),
+        ),
+        device="onnx_yolov8",
+        num_workers=2,
+    )
+    config = MirageConfig(detectors={"shared": detector_config}, cameras={"cam1": camera1, "cam2": camera2})
+
+    app = MirageApp(
+        config,
+        cache_dir=str(Path(tmp) / "cache"),
+        record_dir=str(Path(tmp) / "recordings"),
+        db_path=str(Path(tmp) / "config" / "mirage.db"),
+        enable_go2rtc=False,
+    )
+    try:
+        app.start()
+
+        # TWO detector processes for the one configured detector (num_workers=2),
+        # unlike the num_workers=1 (default) case above.
+        assert len(app.detector_processes) == 2
+        assert set(app.detector_processes.keys()) == {"shared#0", "shared#1"}
+
+        # ONE shared queue for the detector, keyed by detector name (not camera name or
+        # worker index) -- both cam1 and cam2 put() onto this SAME queue, and both
+        # worker processes .get() from it. This is what gives free least-busy-worker
+        # routing: whichever worker is idle and calls .get() first serves the next
+        # request, regardless of which camera it came from. See self.detection_queues's
+        # own docstring in mirage/app.py for the full reasoning.
+        assert set(app.detection_queues.keys()) == {"shared"}
+
+        deadline = time.time() + 40
+        cameras_with_recordings: set[str] = set()
+        while time.time() < deadline and len(cameras_with_recordings) < 2:
+            for cam_name in ("cam1", "cam2"):
+                if Recordings.select().where(Recordings.camera == cam_name).count() > 0:
+                    cameras_with_recordings.add(cam_name)
+            if len(cameras_with_recordings) < 2:
+                time.sleep(1)
+
+        assert cameras_with_recordings == {"cam1", "cam2"}, (
+            f"expected both cameras to independently produce recordings, got {cameras_with_recordings}"
+        )
+
+        for detector in app.detector_processes.values():
+            assert detector.is_alive()
+
+    finally:
+        app.stop()
+
+    for detector in app.detector_processes.values():
+        assert not detector.is_alive()

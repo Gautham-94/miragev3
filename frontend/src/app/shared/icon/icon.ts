@@ -28,6 +28,8 @@ const ICONS: Record<string, string> = {
   download: 'M12 3v12m0 0 4.5-4.5M12 15l-4.5-4.5M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2',
   cpu: 'M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3M7.5 7.5h9v9h-9zM10 10h4v4h-4z',
   pause: 'M7 5h4v14H7zM13 5h4v14h-4z',
+  list: 'M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01',
+  power: 'M12 2v10M18.36 6.64a9 9 0 1 1-12.73 0',
 };
 
 @Component({

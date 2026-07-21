@@ -40,6 +40,14 @@ export const routes: Routes = [
         path: 'queries',
         loadComponent: () => import('./pages/queries/queries-page').then((m) => m.QueriesPage),
       },
+      {
+        path: 'config',
+        loadComponent: () => import('./pages/config/config-page').then((m) => m.ConfigPage),
+      },
+      {
+        path: 'logs',
+        loadComponent: () => import('./pages/logs/logs-page').then((m) => m.LogsPage),
+      },
     ],
   },
 ];

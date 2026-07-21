@@ -175,6 +175,78 @@ class DetectorInstanceConfig(BaseModel):
     name: str
     model: ModelConfig
     device: str = "onnx"  # backend key registered in the detector plugin registry
+    # Lets a detector be registered (and cameras stay routed to it in config) without a
+    # process actually being spawned for it -- e.g. a heavy/experimental detector like
+    # MegaDetector, kept around for occasional testing but not paying its idle memory/
+    # startup cost on every normal run. MirageApp._start_detectors skips disabled
+    # detectors entirely; any camera still routed to one simply gets no detection
+    # (logged, not an error) until reassigned or the detector is re-enabled.
+    enabled: bool = True
+    # How many independent OS processes (each loading its own full copy of the model)
+    # serve cameras routed to this detector name -- 1 (default) preserves the original
+    # "one process per configured detector" behavior byte-for-byte. Every camera routed
+    # to this detector shares ONE queue (see MirageApp.detection_queues's own
+    # docstring), and every one of this detector's num_workers processes blocks on
+    # .get() against that SAME queue -- Python's mp.Queue already hands each queued
+    # item to whichever consumer's blocking .get() unblocks first, so a worker that
+    # just finished a fast inference naturally picks up the next request before a
+    # still-busy sibling does. This gives free least-busy-worker routing with no
+    # separate queue-depth tracking or broker process, and no static camera-to-worker
+    # pinning (a camera can be served by a different worker frame to frame, depending
+    # on which one happens to be free). Exists because a single shared detector process
+    # serializes inference across every camera routed to it (confirmed via a real
+    # measured failure: 3 cameras sharing one MegaDetector instance caused 5-second
+    # per-call timeouts and silent frame drops on the busiest camera, see
+    # PROCESS_AUDIT.md / this session's live debugging) -- adding worker processes
+    # removes that single-consumer bottleneck at the cost of each extra worker's own
+    # memory + a share of CPU/accelerator contention. Increasing this only makes sense
+    # if the host actually has spare CPU cores/accelerator headroom -- see the Config
+    # page's own capability-aware guidance for this field.
+    num_workers: int = Field(default=1, ge=1, le=8)
+
+
+class SpeciesModelConfig(BaseModel):
+    """Backend-agnostic model settings for the (optional) async species classifier --
+    mirrors ModelConfig's own "just enough to locate/load the model file" shape.
+    Backend-specific extras (e.g. SpeciesNet's own geo-prior country/admin1 hints) can
+    be added here later without a schema break, same as ModelConfig has done.
+    """
+
+    model_path: str = ""
+    # SpeciesNet-specific (mirage/species/plugins/speciesnet.py): a Kaggle/HuggingFace
+    # model identifier the `speciesnet` package resolves and auto-downloads itself (see
+    # that plugin's own docstring) -- NOT a local path like model_path above, which
+    # stays for any future backend that loads a plain local model file directly.
+    model_name: str = "kaggle:google/speciesnet/pyTorch/v4.0.3a/1"
+    # Below this softmax score, a classification is treated as "no confident result"
+    # (SpeciesClassification with every field None, species_status="skipped") rather
+    # than reported -- SpeciesNet itself has no built-in cutoff; this is mirage's own
+    # bar, matching the same "an over-approximation is fine, false negatives are safer
+    # than false species labels" spirit as ObjectFilterConfig.threshold.
+    confidence_threshold: float = 0.5
+    # Path to the Python interpreter of a SEPARATE venv with `speciesnet` installed
+    # (see mirage/species/plugins/speciesnet.py's module docstring for why this can't
+    # share mirage's own main venv -- a real, unresolvable numpy/opencv dependency
+    # conflict with norfair). Default assumes the documented sibling-venv setup
+    # (`python3 -m venv .venv-speciesnet && .venv-speciesnet/bin/pip install
+    # speciesnet`) run from the repo root.
+    venv_python_path: str = ".venv-speciesnet/bin/python"
+
+
+class SpeciesClassifierConfig(BaseModel):
+    """Mirage V3: one shared species-classification worker process for every camera's
+    Animal/Bird events (see mirage/species/, mirage/events/processor.py's
+    SPECIES_ENRICHABLE_LABELS). Disabled by default -- species classification never
+    runs, and every Animal/Bird Event's species_status stays "skipped", unless a user
+    explicitly opts in here. Deliberately NOT per-camera (mirrors DetectorInstanceConfig
+    being one shared thing referenced by camera.detector, not duplicated per camera) --
+    unlike detectors, there's only ever one species worker, since Person/Vehicle
+    filtering already happens at the label level, not the camera level.
+    """
+
+    enabled: bool = False
+    device: str = "speciesnet"  # backend key registered in mirage.species.registry
+    model: SpeciesModelConfig = Field(default_factory=SpeciesModelConfig)
 
 
 class OpenVocabQuery(BaseModel):
@@ -304,6 +376,45 @@ class RulesConfig(BaseModel):
     dwell_seconds: int | None = None
 
 
+class PtzPresetConfig(BaseModel):
+    """One ONVIF PTZ preset this camera can be commanded to -- token is the ONVIF
+    device's own preset identifier (from PtzClient.get_presets()/GetPresets), not
+    something mirage assigns itself.
+    """
+
+    token: str
+    name: str | None = None
+
+
+class PtzConfig(BaseModel):
+    """Mirage V3 PTZ hybrid scheduling + ONVIF PTZ control (mirage/ptz/,
+    mirage/tracking/orchestration.py's ptz_moving_fn). Disabled by default -- a camera
+    with ptz.enabled=False behaves EXACTLY as it did before this feature existed (no
+    polling thread spawned, CameraOrchestrator's ptz_moving_fn stays None, byte-for-byte
+    the same hardcoded ptz_moving=False control flow as every other fixed camera).
+
+    Closes a real pre-existing gap: mirage/api/routers/onvif.py's ONVIF discovery/
+    resolve wizard never persists the ONVIF username/password it uses (only the
+    resulting rtsp:// URL is saved) -- ongoing PTZ control (status polling, move
+    commands, presets) requires these credentials to be held onto going forward,
+    unlike the one-shot wizard flow.
+    """
+
+    enabled: bool = False
+    onvif_host: str = ""
+    onvif_port: int = 80
+    onvif_username: str = ""
+    onvif_password: str = ""
+    patrol_enabled: bool = False
+    patrol_presets: list[PtzPresetConfig] = Field(default_factory=list)
+    patrol_interval_seconds: int = 300  # dwell time at each preset before advancing
+    # Grace period after issuing a move command before trusting GetStatus's
+    # MoveStatus == IDLE -- some cameras report IDLE briefly before actually starting
+    # to move, which would otherwise cause the hybrid-scheduling orchestration branch
+    # to flip back to "stationary" one frame too early.
+    move_settle_seconds: float = 2.0
+
+
 # --------------------------------------------------------------------------------------
 # Camera + top-level config
 # --------------------------------------------------------------------------------------
@@ -319,6 +430,7 @@ class CameraConfig(BaseModel):
     record: RecordConfig = Field(default_factory=RecordConfig)
     review: ReviewConfig = Field(default_factory=ReviewConfig)
     rules: RulesConfig = Field(default_factory=RulesConfig)
+    ptz: PtzConfig = Field(default_factory=PtzConfig)
     detector: str = "default"  # which DetectorInstanceConfig this camera routes detection through
     # False (default): open-vocab queries (mirage.openvocab) only ever check crops of
     # objects the closed-vocab detector (`detector` above) already confirmed --
@@ -361,6 +473,16 @@ class MirageConfig(BaseModel):
     detectors: dict[str, DetectorInstanceConfig] = Field(default_factory=dict)
     cameras: dict[str, CameraConfig] = Field(default_factory=dict)
     queries: list[OpenVocabQuery] = Field(default_factory=list)
+    species_classifier: SpeciesClassifierConfig = Field(default_factory=SpeciesClassifierConfig)
+    # Master switch for the open-vocabulary (OWLv2) worker process -- MirageApp.
+    # _start_openvocab previously spawned it purely based on "at least one enabled
+    # OpenVocabQuery exists," with no way to keep queries configured/saved but stop the
+    # ~600MB OWLv2 model from loading (and holding a process + thread alive) without
+    # disabling/deleting every query. True (default) preserves that exact prior
+    # behavior byte-for-byte; False skips the process entirely regardless of how many
+    # queries are enabled, same override relationship SpeciesClassifierConfig.enabled
+    # already has over whether any Animal/Bird events exist.
+    openvocab_enabled: bool = True
 
     @model_validator(mode="after")
     def _validate_camera_detector_refs(self) -> "MirageConfig":

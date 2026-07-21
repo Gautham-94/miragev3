@@ -19,7 +19,9 @@ from mirage.const import PROCESS_PRIORITY_HIGH
 from mirage.detection.labelmap import load_labels
 from mirage.detection.remote import RemoteObjectDetector
 from mirage.detection.tensor import yuv420_to_bgr
+from mirage.logging_bus import LogEvent
 from mirage.motion.detector import MotionDetector
+from mirage.ptz.poller import PtzPoller
 from mirage.tracking.orchestration import CameraOrchestrator
 from mirage.tracking.tracker import ObjectTracker, TrackedObjectState
 from mirage.util.shm import SharedMemoryFrameManager
@@ -84,6 +86,7 @@ def camera_tracker_main(
     frame_queue,
     detected_frames_queue,
     stop_event,
+    activity_log_queue=None,
 ) -> None:
     """Runs as the per-camera tracker OS process. Pulls (frame_name, frame_time) off
     frame_queue (populated by the CameraCapture process, see mirage.capture.capture),
@@ -110,7 +113,30 @@ def camera_tracker_main(
     )
     motion_detector = MotionDetector(frame_shape=camera.frame_shape, config=camera.motion)
     object_tracker = ObjectTracker(fps=camera.detect.fps)
-    orchestrator = CameraOrchestrator(camera, motion_detector, object_tracker, remote_detector)
+
+    # Mirage V3 PTZ hybrid scheduling: only spawn a PtzPoller (and pass a real
+    # ptz_moving_fn into CameraOrchestrator) if this camera has PTZ explicitly enabled
+    # -- camera.ptz.enabled defaults to False, so every existing/non-PTZ camera gets
+    # ptz_moving_fn=None here, preserving the exact pre-V3 control flow byte-for-byte
+    # (see CameraOrchestrator.__init__'s own docstring).
+    ptz_poller: PtzPoller | None = None
+    ptz_moving_fn = None
+    if camera.ptz.enabled:
+        ptz_poller = PtzPoller(camera.name, camera.ptz)
+        ptz_poller.start()
+        ptz_moving_fn = ptz_poller.is_moving
+
+    log_fn = None
+    if activity_log_queue is not None:
+        def log_fn(category: str, message: str, camera_name: str) -> None:
+            try:
+                activity_log_queue.put_nowait(LogEvent(category=category, message=message, camera=camera_name))
+            except queue_module.Full:
+                pass  # log queue backpressure -- drop rather than block the tracker's hot loop
+
+    orchestrator = CameraOrchestrator(
+        camera, motion_detector, object_tracker, remote_detector, ptz_moving_fn=ptz_moving_fn, log_fn=log_fn,
+    )
 
     logger.info("%s: tracker ready", camera.name)
 
@@ -151,6 +177,8 @@ def camera_tracker_main(
             pass  # backpressure: main process fell behind; drop this frame's publish
 
     remote_detector.close()
+    if ptz_poller is not None:
+        ptz_poller.stop()
     logger.info("%s: tracker stopped", camera.name)
 
 
@@ -164,6 +192,7 @@ class CameraTracker(mp.Process):
         frame_queue,
         detected_frames_queue,
         stop_event,
+        activity_log_queue=None,
     ) -> None:
         super().__init__(name=f"tracker:{camera.name}")
         self.camera = camera
@@ -173,6 +202,7 @@ class CameraTracker(mp.Process):
         self.frame_queue = frame_queue
         self.detected_frames_queue = detected_frames_queue
         self.stop_event = stop_event
+        self.activity_log_queue = activity_log_queue
 
     def run(self) -> None:
         camera_tracker_main(
@@ -183,4 +213,5 @@ class CameraTracker(mp.Process):
             self.frame_queue,
             self.detected_frames_queue,
             self.stop_event,
+            self.activity_log_queue,
         )

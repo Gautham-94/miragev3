@@ -82,6 +82,39 @@ def draw_boxes_on_jpeg_bytes(
         return None
 
 
+def crop_jpeg_to_box(frame_jpeg: bytes, box: tuple[float, float, float, float]) -> bytes | None:
+    """Decodes `frame_jpeg`, crops to `box` (x1, y1, x2, y2, full-frame pixel
+    coordinates -- same convention as TrackedObjectState.box), re-encodes the crop as
+    its own JPEG. Used by EventProcessor to produce the species-classifier input from
+    the same clean frame a snapshot is written from (see mirage.events.processor's
+    species dispatch). Returns None on decode/encode failure or a degenerate
+    (zero-area, after clamping to frame bounds) box, rather than raising -- a crop
+    failure should only skip species enrichment for this one event, never break event
+    creation itself.
+    """
+    try:
+        arr = np.frombuffer(frame_jpeg, dtype=np.uint8)
+        image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if image is None:
+            return None
+
+        height, width = image.shape[:2]
+        x1, y1, x2, y2 = (int(v) for v in box)
+        x1, x2 = sorted((max(0, min(x1, width)), max(0, min(x2, width))))
+        y1, y2 = sorted((max(0, min(y1, height)), max(0, min(y2, height))))
+        if x2 <= x1 or y2 <= y1:
+            return None
+
+        crop = image[y1:y2, x1:x2]
+        ok, encoded = cv2.imencode(".jpg", crop)
+        if not ok:
+            return None
+        return encoded.tobytes()
+    except cv2.error:
+        logger.exception("failed to crop snapshot to box")
+        return None
+
+
 def write_clean_snapshot(frame_jpeg: bytes, thumb_dir: str, filename_stem: str) -> str | None:
     """Writes `frame_jpeg` to disk completely unmodified -- the CLEAN snapshot file
     (see this module's own docstring). Distinct from capture_thumbnail below only in

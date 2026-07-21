@@ -1,10 +1,11 @@
 import { Component, DestroyRef, OnInit, computed, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { ActivatedRoute } from '@angular/router';
 import { switchMap } from 'rxjs';
 
 import { visibleInterval } from '../../core/rxjs/visible-interval';
 import { ApiService } from '../../core/services/api.service';
-import { Recording } from '../../core/models/api.models';
+import { Recording, RecordingListParams } from '../../core/models/api.models';
 import { FilterOption, FilterSelect } from '../../shared/filter-select/filter-select';
 import { Icon } from '../../shared/icon/icon';
 import { VideoLightbox } from '../../shared/video-lightbox/video-lightbox';
@@ -31,6 +32,16 @@ export class RecordingsPage implements OnInit {
 
   protected readonly cameraFilter = signal('');
 
+  // Populated from ?camera=&after=&before= query params (see EventsPage.viewVideo) --
+  // narrows which recordings are FETCHED from the API, not just filtered client-side,
+  // since a deep-link from an event could be looking for a segment far outside the
+  // default 200-most-recent window this page normally loads.
+  private timeWindow: { after?: number; before?: number } = {};
+  // Set only when this page was opened via a deep-link (as opposed to normal
+  // browsing) -- used to auto-open the single matching clip, and to show a banner
+  // explaining why the list is pre-filtered.
+  protected readonly deepLinkedCamera = signal<string | null>(null);
+
   protected readonly cameraOptions = computed<FilterOption[]>(() => {
     const cameras = Array.from(new Set(this.recordings().map((r) => r.camera))).sort();
     return [{ value: '', label: 'All cameras' }, ...cameras.map((c) => ({ value: c, label: c }))];
@@ -55,21 +66,53 @@ export class RecordingsPage implements OnInit {
     return Array.from(groups.entries()).map(([dateLabel, recordings]) => ({ dateLabel, recordings }));
   });
 
-  constructor(private readonly api: ApiService, private readonly destroyRef: DestroyRef) {}
+  constructor(
+    private readonly api: ApiService,
+    private readonly destroyRef: DestroyRef,
+    private readonly route: ActivatedRoute,
+  ) {}
 
   ngOnInit(): void {
+    const params = this.route.snapshot.queryParamMap;
+    const camera = params.get('camera');
+    const after = params.get('after');
+    const before = params.get('before');
+    if (camera) {
+      this.cameraFilter.set(camera);
+      this.deepLinkedCamera.set(camera);
+    }
+    if (after) this.timeWindow.after = Number(after);
+    if (before) this.timeWindow.before = Number(before);
+
     visibleInterval(POLL_MS)
       .pipe(
-        switchMap(() => this.api.listRecordings({ limit: 200 })),
+        switchMap(() => this.api.listRecordings(this.listParams())),
         takeUntilDestroyed(this.destroyRef),
       )
       .subscribe({
         next: (recordings) => {
           this.recordings.set(recordings);
           this.loading.set(false);
+          // First load only -- auto-open the clip when a deep-link's time window
+          // narrowed the result down to exactly one match, so "View video" on an
+          // Events card can go straight to playback instead of an extra click.
+          if (this.deepLinkedCamera() && this.openRecording() === null && recordings.length === 1) {
+            this.openRecording.set(recordings[0]);
+          }
         },
         error: () => this.loading.set(false),
       });
+  }
+
+  private listParams(): RecordingListParams {
+    return { limit: 200, ...this.timeWindow };
+  }
+
+  protected clearDeepLink(): void {
+    this.deepLinkedCamera.set(null);
+    this.timeWindow = {};
+    this.cameraFilter.set('');
+    this.api.listRecordings(this.listParams()).subscribe((recordings) => this.recordings.set(recordings));
   }
 
   protected formatTime(epochSeconds: number): string {

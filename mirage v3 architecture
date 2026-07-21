@@ -1,0 +1,463 @@
+# Mirage V3 – Wildlife Monitoring Architecture (Working Design)
+
+**Status:** Agreed Working Architecture
+
+This document consolidates all architectural decisions made for Mirage V3 regarding:
+
+- Detection pipeline
+- Motion detection
+- PTZ camera handling
+- Species classification
+- Queue architecture
+- Event lifecycle
+- Future extensibility
+
+---
+
+# Design Goals
+
+Mirage V3 is **not a rewrite**.
+
+The existing architecture should remain intact wherever possible.
+
+Reuse:
+
+- Camera Capture
+- Detector abstraction
+- Tracking
+- Recording
+- Event generation
+- API
+- Review UI
+
+Only introduce new components where necessary.
+
+The major architectural addition is **asynchronous species classification**.
+
+---
+
+# Overall Architecture
+
+                     RTSP Camera
+                          │
+                          ▼
+                  Camera Capture
+                          │
+                          ▼
+                 Frame Scheduler
+                          │
+          ┌───────────────┴────────────────┐
+          │                                │
+    Fixed Camera                     PTZ Camera
+          │                                │
+          ▼                                ▼
+
+Motion Detection PTZ State Check
+│ │
+Motion Present? Camera Moving?
+│ │
+No ─────────► Drop Yes ───────► Sample @ 1–2 FPS
+│ │
+Yes │
+│ │
+└───────────────┬────────────────┘
+│
+▼
+Broad Detector
+(YOLO / MegaDetector)
+│
+▼
+Tracker
+│
+▼
+Event Generation
+│
+┌───────────────┴────────────────┐
+│ │
+▼ ▼
+Alerts / Recording Species Queue
+│
+▼
+Species Worker
+(SpeciesNet)
+│
+▼
+Update Existing Event
+
+---
+
+# Broad Detection
+
+Broad detection remains synchronous.
+
+Supported detectors include:
+
+- Custom YOLO
+- MegaDetector
+- Future plug-in detectors
+
+Output classes:
+
+- Animal
+- Bird
+- Person
+- Vehicle
+
+Detector architecture remains unchanged.
+
+---
+
+# Species Classification Philosophy
+
+Species classification is **not** part of detection.
+
+Detection answers:
+
+> "What broad object is this?"
+
+Species classifier answers:
+
+> "Which species is this?"
+
+Species classification should never delay:
+
+- alerts
+- recordings
+- event creation
+- tracking
+
+---
+
+# Event Lifecycle
+
+## Step 1 – Detection
+
+Broad detector detects an animal.
+
+Tracker confirms the object.
+
+Mirage immediately creates an event.
+
+Event
+
+label = Animal
+
+species = null
+
+speciesStatus = Pending
+
+The event is immediately:
+
+- stored
+- reviewable
+- alertable
+- recorded
+
+No waiting for SpeciesNet.
+
+---
+
+## Step 2 – Species Queue
+
+Only events classified as:
+
+- Animal
+- Bird
+
+are pushed into the Species Queue.
+
+Person and Vehicle are ignored.
+
+---
+
+## Step 3 – Species Classification
+
+Species Worker reads from the queue.
+
+Responsibilities:
+
+- Crop detected animal
+- Run SpeciesNet
+- Generate confidence
+- Generate taxonomy
+- Return species
+
+---
+
+## Step 4 – Event Enrichment
+
+Instead of creating another event,
+
+Species Worker updates the existing event.
+
+Before
+
+Animal
+
+↓
+
+After
+
+Animal
+
+Species = Elephant
+
+Confidence = 0.99
+
+Taxonomy = Mammalia
+
+Status = Complete
+
+Only one event exists.
+
+---
+
+# Species Queue
+
+Species processing is completely asynchronous.
+
+Event Processor
+
+Species Queue
+
+Species Worker
+
+Species Result
+
+Update Existing Event
+
+Advantages:
+
+- detector never blocks
+- retries possible
+- multiple workers possible
+- scalable
+
+---
+
+# Species Worker
+
+Responsibilities
+
+- Poll Species Queue
+- Load SpeciesNet
+- Perform inference
+- Return classification
+- Update metadata
+
+Future replacement models:
+
+- SpeciesNet
+- BioCLIP
+- BirdNET
+- Custom classifiers
+
+No architecture changes required.
+
+---
+
+# Species Status
+
+Every event contains
+
+Pending
+
+Complete
+
+Failed
+
+Skipped
+
+# PTZ Camera Design
+
+Traditional motion detection cannot be trusted while PTZ cameras move.
+
+Instead the agreed design is:
+
+                    Camera
+                       │
+                Is PTZ moving?
+                 /            \
+              Yes              No
+               │                │
+      Sample at 1–2 FPS    Motion Detection
+               │                │
+      Send to Detector     Motion detected?
+               │                │
+               │          No ─────────► Skip
+               │                │
+               └────────► Yes ─► Detector
+                                   │
+                                Tracker
+                                   │
+                                 Events
+                                   │
+                          Species Queue (animals only)
+
+
+                          The nice thing about this design is that:
+
+- During PTZ movement: you don’t rely on motion detection, but you also don’t overload the GPU because you’re only sampling at 1–2 FPS.
+- When the PTZ stops: you return to the efficient motion-gated pipeline.
+- Fixed cameras: continue to use the existing motion-gated pipeline with no changes.
+- SpeciesNet: remains completely asynchronous and unaffected by these changes.
+
+---
+
+# PTZ Behaviour
+
+## While Moving
+
+Motion detection is bypassed.
+
+Instead:
+
+- sample frames at approximately 1–2 FPS
+- send sampled frames directly to detector
+
+Purpose:
+
+- avoid missing wildlife during pan
+- minimize compute
+
+---
+
+## While Stationary
+
+Resume normal motion detection.
+
+Motion detection again decides whether frames should reach the detector.
+
+Advantages:
+
+- efficient
+- familiar pipeline
+- detector only runs when required
+
+---
+
+# Why This PTZ Design?
+
+Patrol example
+
+Preset A
+
+↓
+
+Move
+
+↓
+
+Preset B
+
+↓
+
+Move
+
+↓
+
+Preset C
+
+Without this design:
+
+Detector runs continuously.
+
+With this design:
+
+Moving
+
+↓
+
+1–2 FPS detector
+
+Stopped
+
+↓
+
+Motion gated detector
+
+Large compute savings.
+
+---
+
+# Detector Scheduling
+
+Scheduler controls inference frequency.
+
+Camera stream itself never changes.
+
+Event Enrichment
+
+Completely asynchronous.
+
+---
+
+# Future AI Modules
+
+The queue architecture naturally extends.
+
+Event
+
+├── Species Queue
+
+├── Behaviour Queue
+
+├── Health Queue
+
+├── Pose Queue
+
+├── Attribute Queue
+
+└── Future AI Modules
+
+Each module enriches the same event independently.
+
+No changes required to the detector pipeline.
+
+---
+
+# Hardware Considerations
+
+Current target deployment:
+
+- 12–20 cameras
+- 1080p streams
+- Motion-gated inference
+- PTZ hybrid scheduling
+- Species classification only for detected animals
+
+Recommended production hardware:
+
+CPU
+
+- Ryzen 5 (modern 6-core)
+
+Memory
+
+- 32 GB preferred
+- 16 GB acceptable for smaller deployments
+
+GPU
+
+- RTX 3050 8 GB minimum
+- RTX 4060 preferred for more headroom
+
+CPU-only deployments are possible for small, low-activity installations but should be validated with benchmarking rather than assumed.
+
+---
+
+# Core Design Principles
+
+1. Preserve Mirage's existing architecture.
+2. Keep detection synchronous.
+3. Make species classification asynchronous.
+4. Never delay alerts waiting for species classification.
+5. Motion detection gates inference for fixed cameras.
+6. PTZ cameras use hybrid scheduling:
+   - Moving → sparse direct detection (1–2 FPS)
+   - Stationary → motion-gated detection
+7. Queue-based processing isolates heavy AI workloads.
+8. Events are enriched, not duplicated.
+9. Detector architecture remains plug-in based.
+10. Species classifier architecture remains plug-in based.
+11. The enrichment architecture is extensible for future AI modules without modifying the real-time detection pipeline.

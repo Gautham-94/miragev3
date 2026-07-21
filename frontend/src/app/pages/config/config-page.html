@@ -1,0 +1,196 @@
+<div class="page">
+  <div class="page-header">
+    <div>
+      <h1 class="page-title">Config</h1>
+      <p class="page-subtitle">System-level controls that don't belong on a single camera or detector's own page</p>
+    </div>
+  </div>
+
+  <section class="section">
+    <div class="section-header">
+      <h2>Detectors</h2>
+      <p>
+        Disable a detector to stop its process from running entirely -- frees the memory/CPU it would otherwise hold
+        idle. Any camera still routed to a disabled detector simply won't detect until reassigned or it's re-enabled.
+        Worker count controls how many independent copies of that detector run at once. Cameras routed to this
+        detector share one queue across all its workers, so whichever worker is free picks up the next request --
+        no camera is ever pinned to a single worker. Manage models on the <a routerLink="/detectors">Detectors</a>
+        page.
+      </p>
+      @if (capabilities(); as caps) {
+        <p class="capability-note">
+          <app-icon name="cpu" [size]="14" />
+          This machine has {{ caps.cpu_count }} CPU core{{ caps.cpu_count === 1 ? '' : 's' }}
+          @if (caps.total_memory_mb > 0) {
+            and {{ caps.total_memory_mb / 1024 | number: '1.0-1' }}&nbsp;GB RAM
+          }.
+          Each extra worker loads a full separate copy of the model (roughly the same memory cost again) and competes
+          for the same CPU/accelerator -- only add workers if cameras on that detector are visibly falling behind
+          (check the <a routerLink="/logs">Logs</a> page for gaps), and keep total workers across all enabled
+          detectors comfortably under the core count above.
+          @if (totalWorkersAcrossDetectors() > caps.cpu_count) {
+            <strong class="capability-warning">
+              Currently {{ totalWorkersAcrossDetectors() }} worker{{ totalWorkersAcrossDetectors() === 1 ? '' : 's' }}
+              configured across enabled detectors -- more than this machine's {{ caps.cpu_count }} core{{ caps.cpu_count === 1 ? '' : 's' }}.
+            </strong>
+          }
+        </p>
+      }
+    </div>
+
+    @if (loading()) {
+      <div class="empty-state">
+        <span class="eyebrow">loading</span>
+      </div>
+    } @else if (loadError()) {
+      <div class="empty-state">
+        <app-icon name="wifiOff" [size]="24" />
+        <p>{{ loadError() }}</p>
+      </div>
+    } @else if (detectors().length === 0) {
+      <div class="empty-state">
+        <span class="eyebrow">no detectors configured</span>
+      </div>
+    } @else {
+      <div class="detector-list">
+        @for (detector of detectors(); track detector.name) {
+          <div class="detector-row" [class.disabled]="!detector.enabled">
+            <app-icon name="cpu" [size]="20" />
+            <div class="detector-info">
+              <span class="detector-name">{{ detector.name }}</span>
+              <span class="detector-meta mono">
+                {{ detector.model_width }}&times;{{ detector.model_height }} ·
+                @if (detector.cameras.length > 0) {
+                  used by {{ detector.cameras.join(', ') }}
+                } @else {
+                  not used by any camera
+                }
+              </span>
+            </div>
+
+            @if (detector.enabled) {
+              <div class="worker-stepper" [class.saving]="changingWorkersName() === detector.name">
+                <button
+                  type="button"
+                  class="stepper-btn"
+                  [disabled]="detector.num_workers <= 1 || changingWorkersName() === detector.name"
+                  (click)="changeNumWorkers(detector, -1)"
+                  title="Fewer workers"
+                >
+                  &minus;
+                </button>
+                <span class="stepper-value mono">{{ detector.num_workers }}&nbsp;worker{{ detector.num_workers === 1 ? '' : 's' }}</span>
+                <button
+                  type="button"
+                  class="stepper-btn"
+                  [disabled]="detector.num_workers >= 8 || changingWorkersName() === detector.name"
+                  (click)="changeNumWorkers(detector, 1)"
+                  title="More workers"
+                >
+                  +
+                </button>
+              </div>
+            }
+
+            <label class="switch" [class.saving]="togglingName() === detector.name">
+              <input
+                type="checkbox"
+                [checked]="detector.enabled"
+                [disabled]="togglingName() === detector.name"
+                (change)="toggleDetector(detector)"
+              />
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+              <span class="switch-label">{{ detector.enabled ? 'Enabled' : 'Disabled' }}</span>
+            </label>
+          </div>
+        }
+      </div>
+    }
+
+    @if (toggleError()) {
+      <div class="inline-error">{{ toggleError() }}</div>
+    }
+    @if (workersError()) {
+      <div class="inline-error">{{ workersError() }}</div>
+    }
+  </section>
+
+  <section class="section">
+    <div class="section-header">
+      <h2>Open-vocabulary search</h2>
+      <p>
+        Controls the OWLv2 worker process that powers free-text <a routerLink="/queries">Queries</a> (e.g. "person
+        carrying a red backpack"). It's a large model (~600&nbsp;MB) kept resident in memory whenever this is on --
+        disable it to free that memory without deleting or disabling your saved queries; they'll simply stop being
+        checked until this is turned back on.
+      </p>
+    </div>
+
+    @if (openvocabLoading()) {
+      <div class="empty-state">
+        <span class="eyebrow">loading</span>
+      </div>
+    } @else {
+      <div class="detector-list">
+        <div class="detector-row" [class.disabled]="!openvocabEnabled()">
+          <app-icon name="search" [size]="20" />
+          <div class="detector-info">
+            <span class="detector-name">OWLv2 open-vocabulary search</span>
+            <span class="detector-meta mono">google/owlv2-base-patch16-ensemble · ~600&nbsp;MB resident</span>
+          </div>
+
+          <label class="switch" [class.saving]="openvocabToggling()">
+            <input
+              type="checkbox"
+              [checked]="openvocabEnabled()"
+              [disabled]="openvocabToggling()"
+              (change)="toggleOpenvocab()"
+            />
+            <span class="switch-track"><span class="switch-thumb"></span></span>
+            <span class="switch-label">{{ openvocabEnabled() ? 'Enabled' : 'Disabled' }}</span>
+          </label>
+        </div>
+      </div>
+    }
+
+    @if (openvocabError()) {
+      <div class="inline-error">{{ openvocabError() }}</div>
+    }
+  </section>
+
+  <section class="section">
+    <div class="section-header">
+      <h2>Pipeline</h2>
+      <p>Restart the detection/recording pipeline to pick up any config changes (detector toggles, camera edits, ...).</p>
+    </div>
+
+    <div class="action-row">
+      <button type="button" class="btn-secondary" [disabled]="restarting()" (click)="requestRestart()">
+        @if (restarting()) {
+          <span class="spinner small"></span>
+        } @else {
+          <app-icon name="power" [size]="16" />
+        }
+        Restart pipeline
+      </button>
+      @if (restartRequested()) {
+        <span class="restart-note">
+          <app-icon name="checkCircle" [size]="14" />
+          Restart requested.
+        </span>
+      }
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-header">
+      <h2>Activity</h2>
+      <p>Live feed of pipeline events -- motion, detections, and species classification.</p>
+    </div>
+    <a class="logs-link" routerLink="/logs">
+      <app-icon name="list" [size]="16" />
+      Open Logs
+      <app-icon name="chevronRight" [size]="16" />
+    </a>
+  </section>
+</div>

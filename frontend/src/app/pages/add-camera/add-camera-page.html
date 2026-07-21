@@ -202,6 +202,33 @@
           the listed labels are tracked.
         </p>
 
+        <label class="field">
+          <span>Alert labels (comma-separated)</span>
+          <input
+            type="text"
+            [ngModel]="alertLabelsInput()"
+            (ngModelChange)="alertLabelsInput.set($event)"
+            name="alertLabels"
+            placeholder="person, car, animal"
+          />
+        </label>
+        <label class="field">
+          <span>Detection labels (comma-separated)</span>
+          <input
+            type="text"
+            [ngModel]="detectionLabelsInput()"
+            (ngModelChange)="detectionLabelsInput.set($event)"
+            name="detectionLabels"
+            placeholder="bird"
+          />
+        </label>
+        <p class="form-hint">
+          Controls which detected labels show up on the Review/Alerts page for this camera -- a label must be listed
+          here to ever appear there, even if it's already being tracked above. Alert labels get the higher-priority
+          "alert" severity; detection labels (lower priority) only apply to labels not already in Alert labels.
+          A tracked label in neither list is recorded (Events/Recordings) but never surfaces on Review/Alerts.
+        </p>
+
         <label class="checkbox-field">
           <input
             type="checkbox"

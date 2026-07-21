@@ -9,6 +9,13 @@
     </div>
   </div>
 
+  @if (deepLinkedCamera(); as camera) {
+    <div class="deep-link-banner">
+      <span>Showing recordings from <strong>{{ camera }}</strong> around the linked event's time.</span>
+      <button type="button" class="clear-link-btn" (click)="clearDeepLink()">Show all recordings</button>
+    </div>
+  }
+
   @if (!loading() && groupedRecordings().length === 0) {
     <div class="empty-state">
       <span class="eyebrow">no recordings yet</span>

@@ -1,0 +1,70 @@
+<div class="page">
+  <div class="page-header">
+    <div>
+      <h1 class="page-title">Logs</h1>
+      <p class="page-subtitle">{{ filteredEntries().length }} entr{{ filteredEntries().length === 1 ? 'y' : 'ies' }} shown</p>
+    </div>
+    <button type="button" class="btn-secondary" (click)="togglePause()">
+      <app-icon [name]="paused() ? 'play' : 'pause'" [size]="16" />
+      {{ paused() ? 'Resume' : 'Pause' }}
+    </button>
+  </div>
+
+  <div class="filters">
+    <div class="field">
+      <span>Category</span>
+      <div class="select-wrap">
+        <select [ngModel]="categoryFilter()" (ngModelChange)="categoryFilter.set($event)">
+          <option value="all">All categories</option>
+          <option value="motion">Motion</option>
+          <option value="detect">Detection</option>
+          <option value="species">Species</option>
+          <option value="system">System</option>
+        </select>
+        <app-icon name="chevronDown" [size]="14" />
+      </div>
+    </div>
+    <div class="field">
+      <span>Camera</span>
+      <div class="select-wrap">
+        <select [ngModel]="cameraFilter()" (ngModelChange)="cameraFilter.set($event)">
+          <option value="all">All cameras</option>
+          @for (camera of cameras(); track camera) {
+            <option [value]="camera">{{ camera }}</option>
+          }
+        </select>
+        <app-icon name="chevronDown" [size]="14" />
+      </div>
+    </div>
+  </div>
+
+  @if (loading()) {
+    <div class="empty-state">
+      <span class="eyebrow">loading</span>
+    </div>
+  } @else if (loadError()) {
+    <div class="empty-state">
+      <app-icon name="wifiOff" [size]="24" />
+      <p>{{ loadError() }}</p>
+    </div>
+  } @else if (filteredEntries().length === 0) {
+    <div class="empty-state">
+      <app-icon name="list" [size]="24" />
+      <span class="eyebrow">no activity yet</span>
+      <p>Motion, detection, and species classification events will appear here as they happen.</p>
+    </div>
+  } @else {
+    <div class="log-list">
+      @for (entry of filteredEntries(); track entry.timestamp + entry.message) {
+        <div class="log-row" [class]="'cat-' + entry.category">
+          <span class="log-time mono">{{ formatTime(entry.timestamp) }}</span>
+          <span class="log-category">{{ categoryLabel(entry.category) }}</span>
+          @if (entry.camera) {
+            <span class="log-camera">{{ entry.camera }}</span>
+          }
+          <span class="log-message">{{ entry.message }}</span>
+        </div>
+      }
+    </div>
+  }
+</div>

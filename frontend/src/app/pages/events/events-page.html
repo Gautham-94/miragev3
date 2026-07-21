@@ -7,6 +7,7 @@
     <div class="filter-bar">
       <app-filter-select label="Camera" [options]="cameraOptions()" [(value)]="cameraFilter" />
       <app-filter-select label="Label" [options]="labelOptions()" [(value)]="labelFilter" />
+      <app-filter-select label="Species" [options]="speciesOptions()" [(value)]="speciesFilter" />
       <app-filter-select label="Range" [options]="timeRangeOptions" [(value)]="timeRangeFilter" />
     </div>
   </div>
@@ -34,9 +35,30 @@
               </div>
             }
             <span class="event-score mono">{{ (event.top_score * 100).toFixed(0) }}%</span>
+            <button
+              type="button"
+              class="video-link-btn"
+              (click)="$event.stopPropagation(); viewVideo(event)"
+              aria-label="View video of this moment"
+              title="View video of this moment"
+            >
+              <app-icon name="play" [size]="14" />
+            </button>
           </div>
           <div class="event-meta">
             <span class="event-label">{{ event.label }}</span>
+            @if (showsSpeciesBadge(event)) {
+              <span
+                class="species-badge"
+                [class.species-complete]="event.species_status === 'complete'"
+                [class.species-failed]="event.species_status === 'failed'"
+              >
+                {{ speciesBadgeText(event) }}
+                @if (speciesConfidenceText(event); as confidence) {
+                  <span class="species-confidence mono">{{ confidence }}</span>
+                }
+              </span>
+            }
             <span class="event-camera">{{ event.camera }}</span>
             <span class="event-time mono">{{ formatTime(event.start_time) }}</span>
           </div>
@@ -49,11 +71,29 @@
 @if (openEvent(); as event) {
   <app-lightbox [imageUrl]="snapshotUrl(event)" [alt]="event.label" (closed)="closeLightbox()">
     <span class="lightbox-label">{{ event.label }}</span>
+    @if (showsSpeciesBadge(event)) {
+      <span class="lightbox-dot">·</span>
+      <span
+        class="species-badge"
+        [class.species-complete]="event.species_status === 'complete'"
+        [class.species-failed]="event.species_status === 'failed'"
+      >
+        {{ speciesBadgeText(event) }}
+        @if (speciesConfidenceText(event); as confidence) {
+          <span class="species-confidence mono">{{ confidence }}</span>
+        }
+      </span>
+    }
     <span class="lightbox-dot">·</span>
     <span>{{ event.camera }}</span>
     <span class="lightbox-dot">·</span>
     <span class="mono">{{ (event.top_score * 100).toFixed(0) }}%</span>
     <span class="lightbox-dot">·</span>
     <span class="mono">{{ formatTime(event.start_time) }}</span>
+    <span class="lightbox-dot">·</span>
+    <button type="button" class="lightbox-video-btn" (click)="viewVideo(event)">
+      <app-icon name="play" [size]="14" />
+      View video
+    </button>
   </app-lightbox>
 }

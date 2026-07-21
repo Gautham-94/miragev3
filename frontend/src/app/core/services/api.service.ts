@@ -13,6 +13,7 @@ import {
   Event,
   ExecutionProvider,
   EventListParams,
+  LogEntry,
   OnvifDevice,
   OnvifResolveResult,
   Query,
@@ -22,6 +23,7 @@ import {
   RecordingListParams,
   ReviewListParams,
   ReviewSegment,
+  SystemCapabilities,
   SystemStatus,
 } from '../models/api.models';
 
@@ -119,6 +121,32 @@ export class ApiService {
 
   deleteDetector(name: string): Observable<void> {
     return this.http.delete<void>(`${this.base}/api/config/detectors/${encodeURIComponent(name)}`);
+  }
+
+  setDetectorEnabled(name: string, enabled: boolean): Observable<Detector> {
+    return this.http.patch<Detector>(`${this.base}/api/config/detectors/${encodeURIComponent(name)}/enabled`, { enabled });
+  }
+
+  getLogs(params: { limit?: number; since?: number } = {}): Observable<LogEntry[]> {
+    return this.http.get<LogEntry[]>(`${this.base}/api/system/logs`, { params: toHttpParams(params) });
+  }
+
+  getOpenvocabSettings(): Observable<{ enabled: boolean }> {
+    return this.http.get<{ enabled: boolean }>(`${this.base}/api/config/openvocab`);
+  }
+
+  setOpenvocabEnabled(enabled: boolean): Observable<{ enabled: boolean }> {
+    return this.http.patch<{ enabled: boolean }>(`${this.base}/api/config/openvocab/enabled`, { enabled });
+  }
+
+  getSystemCapabilities(): Observable<SystemCapabilities> {
+    return this.http.get<SystemCapabilities>(`${this.base}/api/system/capabilities`);
+  }
+
+  setDetectorNumWorkers(name: string, numWorkers: number): Observable<Detector> {
+    return this.http.patch<Detector>(`${this.base}/api/config/detectors/${encodeURIComponent(name)}/num-workers`, {
+      num_workers: numWorkers,
+    });
   }
 
   listExecutionProviders(): Observable<ExecutionProvider[]> {

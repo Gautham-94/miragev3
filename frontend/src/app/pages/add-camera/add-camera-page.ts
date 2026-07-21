@@ -54,6 +54,16 @@ export class AddCameraPage implements OnInit {
   protected readonly cameraName = signal('');
   protected readonly selectedDetector = signal('');
   protected readonly trackObjectsInput = signal('person');
+  // Which tracked-object labels drive Review/Alerts severity for this camera (see
+  // mirage.events.review.classify_severity: a label in this list -> Severity.alert; a
+  // label in detectionLabelsInput below (if not already an alert label) -> the lower
+  // Severity.detection; anything else never becomes a ReviewSegment at all). Defaults
+  // mirror ReviewConfig's own schema default ("person, car") -- NOT auto-derived from
+  // Track objects above, since a label can be tracked (shows in Events) without being
+  // alert-worthy, and vice versa isn't allowed (an alert label not being tracked would
+  // never fire, but that's the user's call to make, not this form's to enforce).
+  protected readonly alertLabelsInput = signal('person, car');
+  protected readonly detectionLabelsInput = signal('');
   // When true, this camera tracks EVERY label its routed detector knows (e.g. all 80
   // COCO classes) -- Track objects above is still saved but ignored by the tracking
   // gate while this is on (see ObjectsConfig.track_all's docstring), so re-disabling
@@ -136,6 +146,8 @@ export class AddCameraPage implements OnInit {
           this.retainDays.set(cam.retain_days);
           this.segmentSeconds.set(cam.segment_seconds);
           this.rtspTransport.set(cam.rtsp_transport);
+          this.alertLabelsInput.set(cam.alert_labels.join(', '));
+          this.detectionLabelsInput.set(cam.detection_labels.join(', '));
           this.openvocabDirectFrame.set(cam.openvocab_direct_frame);
           this.crowdThreshold.set(cam.crowd_threshold);
           this.dwellSeconds.set(cam.dwell_seconds);
@@ -251,6 +263,14 @@ export class AddCameraPage implements OnInit {
       .split(',')
       .map((s) => s.trim())
       .filter((s) => s.length > 0);
+    const alertLabels = this.alertLabelsInput()
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    const detectionLabels = this.detectionLabelsInput()
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
 
     const payload = {
       name: this.cameraName().trim(),
@@ -265,6 +285,12 @@ export class AddCameraPage implements OnInit {
       retain_days: this.retainDays(),
       segment_seconds: this.segmentSeconds(),
       rtsp_transport: this.rtspTransport(),
+      // Explicitly sent (not omitted) even when empty -- the backend treats a MISSING
+      // field as "keep the schema default," but an omitted alertLabels here would
+      // otherwise silently reset an already-customized alert list back to ["person",
+      // "car"] on every single edit+save, which is exactly the bug this field fixes.
+      alert_labels: alertLabels,
+      detection_labels: detectionLabels,
       openvocab_direct_frame: this.openvocabDirectFrame(),
       crowd_threshold: this.crowdThreshold(),
       dwell_seconds: this.dwellSeconds(),
@@ -309,6 +335,8 @@ export class AddCameraPage implements OnInit {
     this.cameraName.set('');
     this.trackObjectsInput.set('person');
     this.trackAll.set(false);
+    this.alertLabelsInput.set('person, car');
+    this.detectionLabelsInput.set('');
     this.rtspTransport.set('tcp');
     this.segmentSeconds.set(10);
     this.openvocabDirectFrame.set(false);

@@ -64,6 +64,9 @@ class DetectorOut(BaseModel):
     execution_provider: ExecutionProvider
     model_path: str
     labelmap_path: str
+    enabled: bool
+    cameras: list[str] = []
+    num_workers: int = 1
 
 
 class CameraWriteRequest(BaseModel):
@@ -320,14 +323,7 @@ def _build_camera_config(req: CameraWriteRequest) -> CameraConfig:
 @router.get("/detectors", response_model=list[DetectorOut])
 def list_detectors(request: Request) -> list[DetectorOut]:
     config = request.app.state.get_config()
-    return [
-        DetectorOut(
-            name=d.name, device=d.device, model_width=d.model.width, model_height=d.model.height,
-            execution_provider=d.model.execution_provider,
-            model_path=d.model.model_path, labelmap_path=d.model.labelmap_path,
-        )
-        for d in config.detectors.values()
-    ]
+    return [_detector_out(d, config) for d in config.detectors.values()]
 
 
 @router.get("/execution-providers", response_model=list[str])
@@ -363,6 +359,15 @@ class DetectorWriteRequest(BaseModel):
     # machine; the caller opts into an accelerator explicitly (see ExecutionProvider's
     # docstring for the real CPU-vs-CoreML benchmark this is based on).
     execution_provider: ExecutionProvider = ExecutionProvider.cpu
+    # False skips spawning a DetectorProcess for this detector entirely on next restart
+    # (see DetectorInstanceConfig.enabled's docstring) -- lets a heavy/experimental
+    # detector be registered and kept configured without paying its idle memory cost.
+    enabled: bool = True
+    # See DetectorInstanceConfig.num_workers's own docstring -- how many independent
+    # worker processes serve cameras routed to this detector, all sharing one queue for
+    # free least-busy-worker routing. 1 (default) is the original
+    # single-process-per-detector behavior.
+    num_workers: int = Field(default=1, ge=1, le=8)
 
 
 def _validate_and_build_detector(req: DetectorWriteRequest) -> DetectorInstanceConfig:
@@ -389,6 +394,8 @@ def _validate_and_build_detector(req: DetectorWriteRequest) -> DetectorInstanceC
         return DetectorInstanceConfig(
             name=req.name,
             device=req.device,
+            enabled=req.enabled,
+            num_workers=req.num_workers,
             model=ModelConfig(
                 width=req.width,
                 height=req.height,
@@ -404,11 +411,15 @@ def _validate_and_build_detector(req: DetectorWriteRequest) -> DetectorInstanceC
         raise HTTPException(status_code=422, detail=str(e)) from e
 
 
-def _detector_out(detector: DetectorInstanceConfig) -> DetectorOut:
+def _detector_out(detector: DetectorInstanceConfig, config: MirageConfig | None = None) -> DetectorOut:
+    cameras = []
+    if config is not None:
+        cameras = sorted(cam.name for cam in config.cameras.values() if cam.detector == detector.name)
     return DetectorOut(
         name=detector.name, device=detector.device, model_width=detector.model.width, model_height=detector.model.height,
         execution_provider=detector.model.execution_provider,
         model_path=detector.model.model_path, labelmap_path=detector.model.labelmap_path,
+        enabled=detector.enabled, cameras=cameras, num_workers=detector.num_workers,
     )
 
 
@@ -423,7 +434,7 @@ def create_detector(req: DetectorWriteRequest, request: Request) -> DetectorOut:
     config.detectors[req.name] = detector
     config.save_to_db()
 
-    return _detector_out(detector)
+    return _detector_out(detector, config)
 
 
 @router.put("/detectors/{name}", response_model=DetectorOut)
@@ -451,7 +462,53 @@ def update_detector(name: str, req: DetectorWriteRequest, request: Request) -> D
     config.detectors[name] = detector
     config.save_to_db()
 
-    return _detector_out(detector)
+    return _detector_out(detector, config)
+
+
+class DetectorEnabledRequest(BaseModel):
+    enabled: bool
+
+
+@router.patch("/detectors/{name}/enabled", response_model=DetectorOut)
+def set_detector_enabled(name: str, req: DetectorEnabledRequest, request: Request) -> DetectorOut:
+    """Lightweight toggle for the config/control page -- flips just
+    DetectorInstanceConfig.enabled without requiring the caller to resend every other
+    field (model path, execution provider, ...) the way PUT /detectors/{name} does.
+    """
+    config = request.app.state.get_config()
+
+    detector = config.detectors.get(name)
+    if detector is None:
+        raise HTTPException(status_code=404, detail=f"unknown detector {name!r}")
+
+    detector.enabled = req.enabled
+    config.save_to_db()
+
+    return _detector_out(detector, config)
+
+
+class DetectorNumWorkersRequest(BaseModel):
+    num_workers: int = Field(ge=1, le=8)
+
+
+@router.patch("/detectors/{name}/num-workers", response_model=DetectorOut)
+def set_detector_num_workers(name: str, req: DetectorNumWorkersRequest, request: Request) -> DetectorOut:
+    """Lightweight control for the Config page's worker-count stepper -- see
+    DetectorInstanceConfig.num_workers's own docstring for what this actually changes
+    (independent OS processes sharing one queue, serving this detector's routed
+    cameras with free least-busy-worker routing; takes effect on next pipeline restart
+    like every other config change here).
+    """
+    config = request.app.state.get_config()
+
+    detector = config.detectors.get(name)
+    if detector is None:
+        raise HTTPException(status_code=404, detail=f"unknown detector {name!r}")
+
+    detector.num_workers = req.num_workers
+    config.save_to_db()
+
+    return _detector_out(detector, config)
 
 
 @router.delete("/detectors/{name}", status_code=204, response_model=None)
@@ -656,3 +713,30 @@ def delete_query(query_id: str, request: Request) -> None:
 
     config.queries = [q for q in config.queries if q.id != query_id]
     config.save_to_db()
+
+
+class OpenVocabSettingsOut(BaseModel):
+    enabled: bool
+
+
+class OpenVocabEnabledRequest(BaseModel):
+    enabled: bool
+
+
+@router.get("/openvocab", response_model=OpenVocabSettingsOut)
+def get_openvocab_settings(request: Request) -> OpenVocabSettingsOut:
+    config = request.app.state.get_config()
+    return OpenVocabSettingsOut(enabled=config.openvocab_enabled)
+
+
+@router.patch("/openvocab/enabled", response_model=OpenVocabSettingsOut)
+def set_openvocab_enabled(req: OpenVocabEnabledRequest, request: Request) -> OpenVocabSettingsOut:
+    """Master switch for the OWLv2 open-vocabulary worker (mirage/app.py's
+    MirageApp._start_openvocab) -- lets queries stay saved/enabled while still keeping
+    the ~600MB OWLv2 model out of memory, rather than requiring every query to be
+    individually disabled/deleted. See MirageConfig.openvocab_enabled's own docstring.
+    """
+    config = request.app.state.get_config()
+    config.openvocab_enabled = req.enabled
+    config.save_to_db()
+    return OpenVocabSettingsOut(enabled=config.openvocab_enabled)

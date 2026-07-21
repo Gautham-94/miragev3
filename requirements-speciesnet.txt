@@ -1,0 +1,14 @@
+# SpeciesNet (mirage/species/plugins/speciesnet.py) runs in its OWN venv, separate
+# from mirage's main .venv -- see that plugin's module docstring for why: the real
+# `speciesnet` PyPI package's transitive deps (yolov5/ultralytics/sahi/roboflow) require
+# numpy>=2 and the GUI `opencv-python` package, which conflict irreconcilably with the
+# main venv's pinned norfair (numpy<2.0) and opencv-python-headless.
+#
+# Setup (from the repo root):
+#   python3 -m venv .venv-speciesnet
+#   .venv-speciesnet/bin/pip install -r requirements-speciesnet.txt
+#
+# Species classification stays fully optional (config.species_classifier.enabled
+# defaults to False) if this venv is never set up -- every Animal/Bird Event's
+# species_status just stays "skipped" until it is.
+speciesnet==5.0.5
