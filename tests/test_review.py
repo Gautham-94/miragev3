@@ -458,3 +458,89 @@ def test_close_all_pending_force_closes_open_segments(db):
 
     row = ReviewSegment.get(ReviewSegment.camera == "cam1")
     assert row.end_time is not None
+
+
+def test_segment_start_notifies_create(db):
+    import queue as queue_module
+
+    maintainer = ReviewSegmentMaintainer(cutoff_seconds=10)
+    maintainer.notify_queue = queue_module.Queue()
+    camera = _camera()
+
+    maintainer.process(camera, 100.0, {"obj1": _active_state("obj1", "car", 100.0)})
+
+    row = ReviewSegment.get(ReviewSegment.camera == "cam1")
+    notified = maintainer.notify_queue.get_nowait()
+    assert notified.table == "review_segment"
+    assert notified.id == row.id
+    assert notified.op == "create"
+    assert maintainer.notify_queue.empty()  # no redundant notify from the same _save() call
+
+
+def test_repeated_frames_with_no_severity_change_do_not_spam_notify(db):
+    import queue as queue_module
+
+    maintainer = ReviewSegmentMaintainer(cutoff_seconds=10)
+    maintainer.notify_queue = queue_module.Queue()
+    camera = _camera()
+
+    maintainer.process(camera, 100.0, {"obj1": _active_state("obj1", "car", 100.0)})
+    maintainer.notify_queue.get_nowait()  # drain the initial "create"
+
+    # Same severity, still contributing -- _save() runs again every frame, but this
+    # should NOT enqueue another notification (no visible change to the frontend).
+    maintainer.process(camera, 101.0, {"obj1": _active_state("obj1", "car", 101.0)})
+    maintainer.process(camera, 102.0, {"obj1": _active_state("obj1", "car", 102.0)})
+
+    assert maintainer.notify_queue.empty()
+
+
+def test_severity_upgrade_notifies_update(db):
+    import queue as queue_module
+
+    maintainer = ReviewSegmentMaintainer(cutoff_seconds=10)
+    maintainer.notify_queue = queue_module.Queue()
+    camera = _camera()
+
+    maintainer.process(camera, 100.0, {"car1": _active_state("car1", "car", 100.0)})
+    maintainer.notify_queue.get_nowait()  # drain the initial "create"
+
+    maintainer.process(
+        camera, 101.0,
+        {"car1": _active_state("car1", "car", 101.0), "person1": _active_state("person1", "person", 101.0)},
+    )
+
+    row = ReviewSegment.get(ReviewSegment.camera == "cam1")
+    notified = maintainer.notify_queue.get_nowait()
+    assert notified.table == "review_segment"
+    assert notified.id == row.id
+    assert notified.op == "update"
+
+
+def test_segment_end_notifies_update(db):
+    import queue as queue_module
+
+    maintainer = ReviewSegmentMaintainer(cutoff_seconds=10)
+    maintainer.notify_queue = queue_module.Queue()
+    camera = _camera()
+
+    maintainer.process(camera, 100.0, {"obj1": _active_state("obj1", "person", 100.0)})
+    maintainer.notify_queue.get_nowait()  # drain the initial "create"
+
+    maintainer.process(camera, 111.0, {})  # past cutoff, no activity -- closes
+
+    row = ReviewSegment.get(ReviewSegment.camera == "cam1")
+    assert row.end_time is not None
+    notified = maintainer.notify_queue.get_nowait()
+    assert notified.table == "review_segment"
+    assert notified.id == row.id
+    assert notified.op == "update"
+
+
+def test_no_notify_queue_does_not_raise(db):
+    maintainer = ReviewSegmentMaintainer(cutoff_seconds=10)  # notify_queue stays None
+    camera = _camera()
+
+    maintainer.process(camera, 100.0, {"obj1": _active_state("obj1", "person", 100.0)})  # should not raise
+
+    assert ReviewSegment.select().count() == 1

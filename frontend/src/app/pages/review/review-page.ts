@@ -2,8 +2,10 @@ import { Component, DestroyRef, OnInit, computed, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { switchMap } from 'rxjs';
 
+import { PagedList } from '../../core/paged-list';
 import { visibleInterval } from '../../core/rxjs/visible-interval';
 import { ApiService } from '../../core/services/api.service';
+import { SseService } from '../../core/services/sse.service';
 import { ReviewSegment, ReviewSeverity } from '../../core/models/api.models';
 import { FilterOption, FilterSelect } from '../../shared/filter-select/filter-select';
 import { Icon } from '../../shared/icon/icon';
@@ -16,7 +18,12 @@ const SEVERITY_OPTIONS: FilterOption[] = [
   { value: 'detection', label: 'Detection' },
 ];
 
-const POLL_MS = 5000;
+// SSE (below) delivers new/updated segments live -- this is now just a periodic
+// safety net for anything missed during a dropped SSE connection.
+const RECONCILE_POLL_MS = 30000;
+// Each card loads a real thumbnail image on initial render -- keep this small; "Load
+// more" fetches further pages on demand.
+const PAGE_SIZE = 20;
 
 @Component({
   selector: 'app-review-page',
@@ -26,7 +33,14 @@ const POLL_MS = 5000;
   styleUrl: './review-page.scss',
 })
 export class ReviewPage implements OnInit {
-  protected readonly segments = signal<ReviewSegment[]>([]);
+  private readonly paged = new PagedList<ReviewSegment>(
+    (limit, offset) => this.api.listReviewSegments({ limit, offset }),
+    (s) => s.id,
+    PAGE_SIZE,
+  );
+  protected readonly segments = this.paged.items;
+  protected readonly hasMore = this.paged.hasMore;
+  protected readonly loadingMore = this.paged.loadingMore;
   protected readonly loading = signal(true);
   protected readonly selected = signal<ReviewSegment | null>(null);
 
@@ -51,29 +65,57 @@ export class ReviewPage implements OnInit {
     );
   });
 
-  constructor(private readonly api: ApiService, private readonly destroyRef: DestroyRef) {}
+  constructor(
+    private readonly api: ApiService,
+    private readonly destroyRef: DestroyRef,
+    private readonly sse: SseService,
+  ) {}
 
   ngOnInit(): void {
-    visibleInterval(POLL_MS)
+    this.api.listReviewSegments({ limit: PAGE_SIZE }).subscribe({
+      next: (segments) => {
+        this.paged.setFirstPage(segments);
+        this.loading.set(false);
+        this.syncOpenDetail();
+      },
+      error: () => this.loading.set(false),
+    });
+
+    this.sse
+      .connect(this.api.eventsStreamUrl())
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((msg) => {
+        if (msg.type === 'review_segment') {
+          this.paged.prependLive(msg.data as ReviewSegment);
+          this.syncOpenDetail();
+        }
+      });
+
+    visibleInterval(RECONCILE_POLL_MS)
       .pipe(
-        switchMap(() => this.api.listReviewSegments({ limit: 100 })),
+        switchMap(() => this.api.listReviewSegments({ limit: PAGE_SIZE })),
         takeUntilDestroyed(this.destroyRef),
       )
       .subscribe({
         next: (segments) => {
-          this.segments.set(segments);
-          this.loading.set(false);
-
-          // Keep an open detail panel in sync with the freshest data (e.g. its
-          // end_time/duration updating while ongoing) rather than showing a stale
-          // snapshot from whenever it was first opened.
-          const openId = this.selected()?.id;
-          if (openId) {
-            this.selected.set(segments.find((s) => s.id === openId) ?? null);
-          }
+          this.paged.setFirstPage(segments);
+          this.syncOpenDetail();
         },
-        error: () => this.loading.set(false),
       });
+  }
+
+  protected loadMore(): void {
+    this.paged.loadMore();
+  }
+
+  // Keep an open detail panel in sync with the freshest data (e.g. its end_time/
+  // duration updating while ongoing) rather than showing a stale snapshot from
+  // whenever it was first opened.
+  private syncOpenDetail(): void {
+    const openId = this.selected()?.id;
+    if (openId) {
+      this.selected.set(this.segments().find((s) => s.id === openId) ?? null);
+    }
   }
 
   protected select(segment: ReviewSegment): void {

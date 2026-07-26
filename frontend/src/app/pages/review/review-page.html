@@ -41,6 +41,13 @@
         </button>
       }
     </div>
+    @if (hasMore()) {
+      <div class="load-more-row">
+        <button type="button" class="load-more-btn" (click)="loadMore()" [disabled]="loadingMore()">
+          {{ loadingMore() ? 'Loading…' : 'Load more' }}
+        </button>
+      </div>
+    }
   }
 
   @if (selected(); as segment) {

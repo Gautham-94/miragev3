@@ -550,3 +550,30 @@ def test_close_dangling_events_on_startup(db):
 
     row = Event.get(Event.id == "dangling1")
     assert row.end_time is not None
+
+
+def test_new_object_notifies_when_notify_queue_is_wired(db):
+    import queue as queue_module
+
+    processor = EventProcessor()
+    processor.notify_queue = queue_module.Queue()
+    camera = _camera()
+    state = _state("obj1", "person", 0.9, frame_time=100.0)
+
+    processor.process(camera, 100.0, {"obj1": state})
+
+    event = Event.get()
+    notified = processor.notify_queue.get_nowait()
+    assert notified.table == "event"
+    assert notified.id == event.id
+    assert notified.op == "create"
+
+
+def test_new_object_with_no_notify_queue_does_not_raise(db):
+    processor = EventProcessor()  # notify_queue stays None
+    camera = _camera()
+    state = _state("obj1", "person", 0.9, frame_time=100.0)
+
+    processor.process(camera, 100.0, {"obj1": state})  # should not raise
+
+    assert Event.select().count() == 1

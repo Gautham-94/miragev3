@@ -30,6 +30,7 @@ from mirage.events.review import ReviewSegmentMaintainer
 from mirage.go2rtc.process import Go2rtcProcess
 from mirage.ipc.zmq_pubsub import ZmqProxy
 from mirage.logging_bus import ActivityLogWriter, LogEvent
+from mirage.notify_bus import NotifyEvent, NotifyLogWriter
 from mirage.openvocab.device import resolve_device
 from mirage.openvocab.dispatcher import OpenVocabDispatcher
 from mirage.openvocab.process import OpenVocabProcess
@@ -115,10 +116,17 @@ class MirageApp:
         self.activity_log_queue: "mp.Queue" = self.manager.Queue(maxsize=2000)
         self.activity_log_writer: ActivityLogWriter | None = None
 
+        # Live-notification bus (frontend SSE stream) -- same one-writer shape as
+        # activity_log_queue above, see mirage.notify_bus's module docstring.
+        self.notify_queue: "mp.Queue" = self.manager.Queue(maxsize=2000)
+        self.notify_writer: NotifyLogWriter | None = None
+
         thumbnail_fetcher = self._fetch_go2rtc_thumbnail if self.enable_go2rtc else None
         self.event_processor = EventProcessor(thumbnail_fetcher=thumbnail_fetcher)
         self.event_processor.activity_log_queue = self.activity_log_queue
+        self.event_processor.notify_queue = self.notify_queue
         self.review_maintainer = ReviewSegmentMaintainer(thumbnail_fetcher=thumbnail_fetcher)
+        self.review_maintainer.notify_queue = self.notify_queue
         self.rules_engine = RulesEngine()
         self.result_consumer_thread: threading.Thread | None = None
         self.record_thread: threading.Thread | None = None
@@ -158,6 +166,7 @@ class MirageApp:
         self.event_processor.close_dangling_events()
 
         self.activity_log_writer = ActivityLogWriter(self.cache_dir)
+        self.notify_writer = NotifyLogWriter(self.cache_dir)
 
         self.zmq_proxy = ZmqProxy(self.detector_pub_addr, self.detector_sub_addr)
 
@@ -291,6 +300,7 @@ class MirageApp:
             request_queue=self.openvocab_request_queue, result_queue=self.openvocab_result_queue,
             frame_manager=self.frame_manager,
         )
+        self.openvocab_dispatcher.notify_queue = self.notify_queue
         logger.info("openvocab: started (device=%s), %d enabled quer%s", device, len(active_queries), "y" if len(active_queries) == 1 else "ies")
 
     def _start_species_worker(self) -> None:
@@ -520,6 +530,25 @@ class MirageApp:
                     logger.exception("error draining species classification results")
 
             self._drain_activity_log()
+            self._drain_notify_queue()
+
+    def _drain_notify_queue(self) -> None:
+        """Non-blocking drain of every NotifyEvent any pipeline process/thread has put
+        onto notify_queue since the last iteration -- see this class's notify_queue
+        docstring and mirage.notify_bus's module docstring for why only this loop ever
+        touches NotifyLogWriter.
+        """
+        while True:
+            try:
+                event: NotifyEvent = self.notify_queue.get_nowait()
+            except queue_module.Empty:
+                break
+            except (OSError, EOFError):
+                break
+            try:
+                self.notify_writer.append(event)
+            except Exception:
+                logger.exception("error appending to notify log")
 
     def _drain_activity_log(self) -> None:
         """Non-blocking drain of every LogEvent any pipeline process/thread has put

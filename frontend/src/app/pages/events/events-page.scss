@@ -200,3 +200,21 @@
     outline-offset: 2px;
   }
 }
+
+.inline-error {
+  padding: var(--space-3);
+  background: var(--severity-alert-wash);
+  border: 1px solid rgba(255, 59, 59, 0.3);
+  border-radius: var(--radius-md);
+  color: var(--severity-alert);
+  font-size: var(--text-sm);
+}
+
+.clip-error-banner {
+  position: fixed;
+  bottom: var(--space-6);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 100;
+  box-shadow: var(--shadow-panel);
+}
