@@ -58,6 +58,7 @@ from mirage.config.schema import CameraConfig, MirageConfig, PixelFormat
 from mirage.const import QUERY_MATCH_THUMB_DIR
 from mirage.db.models import QueryMatch
 from mirage.detection.tensor import crop_yuv_region, yuv420_to_rgb
+from mirage.notify_bus import NotifyEvent
 from mirage.openvocab.gating import OpenVocabGate
 from mirage.openvocab.process import OpenVocabMatch, OpenVocabRequest, OpenVocabResult
 from mirage.tracking.stationary import StationaryClassifier, iou
@@ -151,6 +152,10 @@ class OpenVocabDispatcher:
         self.frame_manager = frame_manager
         self.thumb_dir = thumb_dir
         self.gate = OpenVocabGate()
+        # Set by MirageApp AFTER construction -- an mp.Queue feeding the frontend's live
+        # SSE stream (see mirage.notify_bus). None means notification is silently
+        # skipped (e.g. direct-construction tests).
+        self.notify_queue = None
         # request_id -> (camera_name, object_id, frame_time) -- so a returned result can
         # be matched back to which frame/object it was for, since OpenVocabResult only
         # carries what OpenVocabProcess itself was given (it never sees frame_time).
@@ -286,6 +291,14 @@ class OpenVocabDispatcher:
     def forget_object(self, object_id: str) -> None:
         self.gate.forget(object_id)
 
+    def _notify(self, row_id: str, op: str) -> None:
+        if self.notify_queue is None:
+            return
+        try:
+            self.notify_queue.put_nowait(NotifyEvent(table="query_match", id=row_id, op=op))
+        except Exception:
+            pass  # notify queue backpressure/full -- never let SSE affect dispatch
+
     def _drain_results(self) -> None:
         while True:
             try:
@@ -313,6 +326,7 @@ class OpenVocabDispatcher:
                     box=list(match.box),
                     thumb_path=thumb_path,
                 )
+                self._notify(match_id, "create")
                 logger.info(
                     "openvocab: match found -- camera=%s object=%s query=%r score=%.3f",
                     result.camera_name, result.object_id, match.query_text, match.score,

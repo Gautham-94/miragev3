@@ -1,0 +1,16 @@
+Commands used
+
+# 1. Mirage pipeline (main process)
+cd mirage
+.venv/bin/python -m mirage &
+
+# 2. Mirage API (separate process, required for frontend/config access)
+.venv/bin/python -m mirage.api &
+
+# 3. Mock cameras (repo root, not inside mirage/)
+cd ../mock_cameras
+.venv/bin/python -m mock_cameras --config config.yaml &
+
+# 4. Frontend dev server
+cd ../mirage/frontend
+npm start &

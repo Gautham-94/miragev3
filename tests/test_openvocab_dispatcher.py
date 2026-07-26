@@ -308,6 +308,59 @@ def test_draining_a_result_with_matches_creates_query_match_rows(db, frame_manag
     assert Path(row.thumb_path).read_bytes() == fake_jpeg
 
 
+def test_draining_a_result_with_matches_notifies_create(db, frame_manager, thumb_dir):
+    import queue as queue_module
+
+    request_q, result_q = FakeQueue(), FakeQueue()
+    dispatcher = OpenVocabDispatcher(request_q, result_q, frame_manager, thumb_dir=thumb_dir)
+    dispatcher.notify_queue = queue_module.Queue()
+    dispatcher._pending["req1"] = ("cam1", "obj1", 100.0)
+
+    result = OpenVocabResult(
+        request_id="req1", camera_name="cam1", object_id="obj1",
+        matches=[OpenVocabMatch(query_id="q1", query_text="a red backpack", score=0.42, box=(5.0, 10.0, 30.0, 40.0))],
+        crop_jpeg=b"\xff\xd8\xff\xe0fake jpeg bytes for testing",
+    )
+    result_q.put(result)
+    dispatcher._drain_results()
+
+    row = QueryMatch.get()
+    notified = dispatcher.notify_queue.get_nowait()
+    assert notified.table == "query_match"
+    assert notified.id == row.id
+    assert notified.op == "create"
+
+
+def test_draining_a_result_with_no_matches_does_not_notify(db, frame_manager):
+    import queue as queue_module
+
+    request_q, result_q = FakeQueue(), FakeQueue()
+    dispatcher = OpenVocabDispatcher(request_q, result_q, frame_manager)
+    dispatcher.notify_queue = queue_module.Queue()
+    dispatcher._pending["req1"] = ("cam1", "obj1", 100.0)
+
+    result_q.put(OpenVocabResult(request_id="req1", camera_name="cam1", object_id="obj1", matches=[]))
+    dispatcher._drain_results()
+
+    assert dispatcher.notify_queue.empty()
+
+
+def test_draining_a_result_with_no_notify_queue_does_not_raise(db, frame_manager, thumb_dir):
+    request_q, result_q = FakeQueue(), FakeQueue()
+    dispatcher = OpenVocabDispatcher(request_q, result_q, frame_manager, thumb_dir=thumb_dir)  # notify_queue stays None
+    dispatcher._pending["req1"] = ("cam1", "obj1", 100.0)
+
+    result = OpenVocabResult(
+        request_id="req1", camera_name="cam1", object_id="obj1",
+        matches=[OpenVocabMatch(query_id="q1", query_text="a red backpack", score=0.42, box=(5.0, 10.0, 30.0, 40.0))],
+        crop_jpeg=b"\xff\xd8\xff\xe0fake jpeg bytes for testing",
+    )
+    result_q.put(result)
+    dispatcher._drain_results()  # should not raise
+
+    assert QueryMatch.select().count() == 1
+
+
 def test_draining_a_result_with_no_crop_leaves_thumb_path_unset(db, frame_manager, thumb_dir):
     # Defensive case: an exception-path OpenVocabResult (see process.py's
     # openvocab_process_main) has crop_jpeg=b"" -- must not crash trying to write an

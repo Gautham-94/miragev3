@@ -1,16 +1,24 @@
 from __future__ import annotations
 
+import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
 
 from mirage.api.schemas import EventOut
 from mirage.db.models import Event
+from mirage.recording.stitch import recordings_overlapping, stitch_recordings
 from mirage.util.thumbnail import draw_boxes_on_jpeg_bytes
 from mirage.util.time import utc_from_timestamp
 
 router = APIRouter(prefix="/api/events", tags=["events"])
+
+# An Event with no end_time yet (object still being tracked) or a very short-lived one
+# has too narrow a window to reliably overlap a recording segment boundary -- pad both
+# sides, same margin the frontend's old Events->Recordings deep-link already used
+# (see EventsPage.viewVideo's RECORDING_LOOKUP_PADDING_SECONDS).
+CLIP_WINDOW_PADDING_SECONDS = 30
 
 
 @router.get("", response_model=list[EventOut])
@@ -91,3 +99,43 @@ def get_event_snapshot(
         return FileResponse(path, media_type="image/jpeg")
 
     return Response(boxed_bytes, media_type="image/jpeg")
+
+
+@router.get("/{event_id}/clip")
+def get_event_clip(event_id: str, request: Request) -> FileResponse:
+    """Stitches every permanent recording clip overlapping this event's time window
+    (padded by CLIP_WINDOW_PADDING_SECONDS on both sides) into one continuous video --
+    same mirage.recording.stitch primitive mirage.api.routers.review's review-segment
+    clip endpoint uses, since there's no single recording file that already equals an
+    event's own (usually sub-recording-length) time window, and no direct Event<->
+    Recordings foreign key to look up instead. Cached under
+    request.app.state.export_dir keyed by event id, same as the review clip endpoint.
+
+    No filename=... passed to FileResponse -- see mirage.api.routers.review's own clip
+    endpoint docstring for why that would break inline <video> playback.
+    """
+    event = Event.get_or_none(Event.id == event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail=f"unknown event {event_id!r}")
+
+    dest_path = Path(request.app.state.export_dir) / "event_clips" / f"{event_id}.mp4"
+    if dest_path.exists():
+        return FileResponse(dest_path, media_type="video/mp4")
+
+    padding = datetime.timedelta(seconds=CLIP_WINDOW_PADDING_SECONDS)
+    window_start = event.start_time - padding
+    window_end = (event.end_time or event.start_time) + padding
+
+    recordings = recordings_overlapping(event.camera, window_start, window_end)
+    if not recordings:
+        raise HTTPException(
+            status_code=404,
+            detail="no recordings cover this event's time window (may have been deleted by retention)",
+        )
+
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    ok = stitch_recordings(recordings, dest_path)
+    if not ok:
+        raise HTTPException(status_code=500, detail="failed to stitch recordings for this event")
+
+    return FileResponse(dest_path, media_type="video/mp4")

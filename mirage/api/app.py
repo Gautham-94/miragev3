@@ -7,6 +7,7 @@ writes to; it does not own or supervise any of the capture/detect/track/record p
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -17,6 +18,7 @@ from mirage.api.routers import (
     config as config_router,
     events,
     live,
+    notifications,
     onvif,
     ptz,
     query_matches,
@@ -69,7 +71,13 @@ def create_app(
             app.state.get_config = lambda: config
         else:
             app.state.get_config = MirageConfig.from_db
+        app.state.notify_task = asyncio.create_task(notifications.notify_tailer_loop(cache_dir))
         yield
+        app.state.notify_task.cancel()
+        try:
+            await app.state.notify_task
+        except asyncio.CancelledError:
+            pass
         if app.state.database is not None:
             close_database(app.state.database)
 
@@ -84,6 +92,11 @@ def create_app(
 
     app.include_router(cameras.router)
     app.include_router(config_router.router)
+    # notifications.router's GET /stream must be registered BEFORE events.router --
+    # both share the /api/events prefix, and events.router's GET /{event_id} would
+    # otherwise greedily match "/api/events/stream" first (event_id="stream", a real
+    # route match that just 404s on lookup) since FastAPI matches in registration order.
+    app.include_router(notifications.router)
     app.include_router(events.router)
     app.include_router(onvif.router)
     app.include_router(ptz.router)

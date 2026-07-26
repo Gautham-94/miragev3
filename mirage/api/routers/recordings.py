@@ -42,10 +42,13 @@ def get_recording(recording_id: str) -> RecordingOut:
 
 @router.get("/{recording_id}/clip")
 def get_recording_clip(recording_id: str) -> FileResponse:
+    # No `filename=` here -- that sets Content-Disposition: attachment, which blocks
+    # inline <video> playback (browser treats the response as a forced download only).
+    # The frontend's download link/button sets its own [download] attribute instead.
     rec = Recordings.get_or_none(Recordings.id == recording_id)
     if rec is None:
         raise HTTPException(status_code=404, detail=f"unknown recording {recording_id!r}")
     path = Path(rec.path)
     if not path.exists():
         raise HTTPException(status_code=410, detail=f"recording file no longer exists on disk: {rec.path}")
-    return FileResponse(path, media_type="video/mp4", filename=path.name)
+    return FileResponse(path, media_type="video/mp4")

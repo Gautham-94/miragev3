@@ -1,11 +1,21 @@
-import { Component, OnInit, computed, signal } from '@angular/core';
+import { Component, DestroyRef, OnInit, computed, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { switchMap } from 'rxjs';
 
+import { PagedList } from '../../core/paged-list';
+import { visibleInterval } from '../../core/rxjs/visible-interval';
 import { ApiService } from '../../core/services/api.service';
+import { SseService } from '../../core/services/sse.service';
 import { CameraConfigDetail, Query, QueryMatch } from '../../core/models/api.models';
 import { Icon } from '../../shared/icon/icon';
 import { Lightbox } from '../../shared/lightbox/lightbox';
+
+// SSE delivers new matches live; this is a periodic safety net for anything missed
+// during a dropped SSE connection (matches the Events/Review pages' cadence).
+const RECONCILE_POLL_MS = 30000;
+const PAGE_SIZE = 50;
 
 @Component({
   selector: 'app-queries-page',
@@ -15,9 +25,16 @@ import { Lightbox } from '../../shared/lightbox/lightbox';
   styleUrl: './queries-page.scss',
 })
 export class QueriesPage implements OnInit {
+  private readonly pagedMatches = new PagedList<QueryMatch>(
+    (limit, offset) => this.api.listQueryMatches({ limit, offset }),
+    (m) => m.id,
+    PAGE_SIZE,
+  );
   protected readonly queries = signal<Query[]>([]);
   protected readonly cameras = signal<CameraConfigDetail[]>([]);
-  protected readonly matches = signal<QueryMatch[]>([]);
+  protected readonly matches = this.pagedMatches.items;
+  protected readonly hasMoreMatches = this.pagedMatches.hasMore;
+  protected readonly loadingMoreMatches = this.pagedMatches.loadingMore;
   protected readonly loading = signal(true);
   protected readonly loadError = signal<string | null>(null);
 
@@ -40,11 +57,33 @@ export class QueriesPage implements OnInit {
 
   protected readonly canSubmit = computed(() => this.text().trim().length > 0);
 
-  constructor(private readonly api: ApiService) {}
+  constructor(
+    private readonly api: ApiService,
+    private readonly destroyRef: DestroyRef,
+    private readonly sse: SseService,
+  ) {}
 
   ngOnInit(): void {
     this.load();
     this.loadMatches();
+
+    this.sse
+      .connect(this.api.eventsStreamUrl())
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((msg) => {
+        if (msg.type === 'query_match') this.pagedMatches.prependLive(msg.data as QueryMatch);
+      });
+
+    visibleInterval(RECONCILE_POLL_MS)
+      .pipe(
+        switchMap(() => this.api.listQueryMatches({ limit: PAGE_SIZE })),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe({ next: (matches) => this.pagedMatches.setFirstPage(matches) });
+  }
+
+  protected loadMoreMatches(): void {
+    this.pagedMatches.loadMore();
   }
 
   private load(): void {
@@ -66,8 +105,8 @@ export class QueriesPage implements OnInit {
   }
 
   private loadMatches(): void {
-    this.api.listQueryMatches({ limit: 50 }).subscribe({
-      next: (matches) => this.matches.set(matches),
+    this.api.listQueryMatches({ limit: PAGE_SIZE }).subscribe({
+      next: (matches) => this.pagedMatches.setFirstPage(matches),
       error: () => {},
     });
   }

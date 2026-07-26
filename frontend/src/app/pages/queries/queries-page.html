@@ -192,6 +192,13 @@
           </button>
         }
       </div>
+      @if (hasMoreMatches()) {
+        <div class="load-more-row">
+          <button type="button" class="load-more-btn" (click)="loadMoreMatches()" [disabled]="loadingMoreMatches()">
+            {{ loadingMoreMatches() ? 'Loading…' : 'Load more' }}
+          </button>
+        </div>
+      }
     }
   </div>
 </div>

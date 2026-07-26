@@ -3,6 +3,7 @@ import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { ActivatedRoute } from '@angular/router';
 import { switchMap } from 'rxjs';
 
+import { PagedList } from '../../core/paged-list';
 import { visibleInterval } from '../../core/rxjs/visible-interval';
 import { ApiService } from '../../core/services/api.service';
 import { Recording, RecordingListParams } from '../../core/models/api.models';
@@ -15,7 +16,14 @@ interface RecordingGroup {
   recordings: Recording[];
 }
 
+// Recordings are produced by a separate maintainer thread on a segment-rotation
+// cadence, not the detected-event pipeline path -- no SSE stream for these, this poll
+// remains the only freshness mechanism (also handles the deep-link time-window case).
 const POLL_MS = 10000;
+// Each recording card loads a real poster <video> (and a second preview <video> on
+// hover), so a large initial page size means dozens of simultaneous video requests on
+// page load -- keep this small; "Load more" fetches further pages on demand.
+const PAGE_SIZE = 20;
 
 @Component({
   selector: 'app-recordings-page',
@@ -25,7 +33,14 @@ const POLL_MS = 10000;
   styleUrl: './recordings-page.scss',
 })
 export class RecordingsPage implements OnInit {
-  protected readonly recordings = signal<Recording[]>([]);
+  private readonly paged = new PagedList<Recording>(
+    (limit, offset) => this.api.listRecordings({ ...this.listParams(), limit, offset }),
+    (r) => r.id,
+    PAGE_SIZE,
+  );
+  protected readonly recordings = this.paged.items;
+  protected readonly hasMore = this.paged.hasMore;
+  protected readonly loadingMore = this.paged.loadingMore;
   protected readonly loading = signal(true);
   protected readonly hoveredId = signal<string | null>(null);
   protected readonly openRecording = signal<Recording | null>(null);
@@ -86,12 +101,12 @@ export class RecordingsPage implements OnInit {
 
     visibleInterval(POLL_MS)
       .pipe(
-        switchMap(() => this.api.listRecordings(this.listParams())),
+        switchMap(() => this.api.listRecordings({ ...this.listParams(), limit: PAGE_SIZE })),
         takeUntilDestroyed(this.destroyRef),
       )
       .subscribe({
         next: (recordings) => {
-          this.recordings.set(recordings);
+          this.paged.setFirstPage(recordings);
           this.loading.set(false);
           // First load only -- auto-open the clip when a deep-link's time window
           // narrowed the result down to exactly one match, so "View video" on an
@@ -104,15 +119,22 @@ export class RecordingsPage implements OnInit {
       });
   }
 
+  protected loadMore(): void {
+    this.paged.loadMore();
+  }
+
   private listParams(): RecordingListParams {
-    return { limit: 200, ...this.timeWindow };
+    return this.timeWindow;
   }
 
   protected clearDeepLink(): void {
     this.deepLinkedCamera.set(null);
     this.timeWindow = {};
     this.cameraFilter.set('');
-    this.api.listRecordings(this.listParams()).subscribe((recordings) => this.recordings.set(recordings));
+    this.paged.reset();
+    this.api
+      .listRecordings({ ...this.listParams(), limit: PAGE_SIZE })
+      .subscribe((recordings) => this.paged.setFirstPage(recordings));
   }
 
   protected formatTime(epochSeconds: number): string {

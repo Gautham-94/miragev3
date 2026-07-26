@@ -15,6 +15,7 @@ from mirage.config.schema import CameraConfig
 from mirage.const import EVENT_SNAPSHOT_DIR
 from mirage.db.models import Event
 from mirage.logging_bus import LogEvent
+from mirage.notify_bus import NotifyEvent
 from mirage.tracking.tracker import TrackedObjectState
 from mirage.util.thumbnail import ThumbnailFetcher, capture_thumbnail, crop_jpeg_to_box, write_clean_snapshot
 from mirage.util.time import utc_from_timestamp, utcnow
@@ -82,6 +83,10 @@ class EventProcessor:
         # mp.Queue for the Logs page (see mirage.logging_bus). None (e.g. in tests that
         # construct EventProcessor directly) means logging is silently skipped.
         self.activity_log_queue = None
+        # Set by MirageApp AFTER construction, same pattern -- an mp.Queue feeding the
+        # frontend's live SSE stream (see mirage.notify_bus). None means notification is
+        # silently skipped (e.g. direct-construction tests).
+        self.notify_queue = None
 
     def _log(self, category: str, message: str, camera_name: str | None = None) -> None:
         if self.activity_log_queue is None:
@@ -90,6 +95,14 @@ class EventProcessor:
             self.activity_log_queue.put_nowait(LogEvent(category=category, message=message, camera=camera_name))
         except Exception:
             pass  # log queue backpressure/full -- never let logging affect event processing
+
+    def _notify(self, table: str, row_id: str, op: str) -> None:
+        if self.notify_queue is None:
+            return
+        try:
+            self.notify_queue.put_nowait(NotifyEvent(table=table, id=row_id, op=op))
+        except Exception:
+            pass  # notify queue backpressure/full -- never let SSE affect event processing
 
     def process(
         self,
@@ -233,6 +246,7 @@ class EventProcessor:
         )
         logger.debug("%s: event %s started for %s", camera.name, event_id, state.label)
         self._log("detect", f"{state.label} detected", camera.name)
+        self._notify("event", event_id, "create")
 
     def _on_update(self, camera: CameraConfig, obj_id: str, state: TrackedObjectState, frame_time: float) -> None:
         entry = self._active.get(obj_id)

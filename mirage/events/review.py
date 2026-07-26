@@ -16,6 +16,7 @@ from enum import Enum
 from mirage.config.schema import CameraConfig
 from mirage.const import REVIEW_THUMB_DIR
 from mirage.db.models import ReviewSegment
+from mirage.notify_bus import NotifyEvent
 from mirage.tracking.rules import RULE_OBJECT_ID_PREFIX
 from mirage.tracking.tracker import TrackedObjectState
 from mirage.util.thumbnail import ThumbnailFetcher, capture_thumbnail
@@ -171,6 +172,18 @@ class ReviewSegmentMaintainer:
         self.thumbnail_fetcher = thumbnail_fetcher
         self.thumb_dir = thumb_dir
         self._pending: dict[str, PendingReviewSegment] = {}  # camera -> pending segment
+        # Set by MirageApp AFTER construction -- an mp.Queue feeding the frontend's live
+        # SSE stream (see mirage.notify_bus). None means notification is silently
+        # skipped (e.g. direct-construction tests).
+        self.notify_queue = None
+
+    def _notify(self, row_id: str, op: str) -> None:
+        if self.notify_queue is None:
+            return
+        try:
+            self.notify_queue.put_nowait(NotifyEvent(table="review_segment", id=row_id, op=op))
+        except Exception:
+            pass  # notify queue backpressure/full -- never let SSE affect review processing
 
     def process(
         self,
@@ -200,10 +213,17 @@ class ReviewSegmentMaintainer:
         if contributing:
             highest_severity = max((s for _, _, s in contributing), key=_SEVERITY_RANK.__getitem__)
 
+            # Only a genuine transition (new segment, or a severity upgrade) is worth
+            # notifying the frontend about -- process() otherwise calls _save() on
+            # EVERY qualifying frame while a segment stays active, which would flood
+            # the notify queue with redundant "update" spam for no visible change.
+            notify_op: str | None = None
             if pending is None:
                 pending = self._start_segment(camera, frame_time, highest_severity, tracked_objects)
+                notify_op = "create"
             elif _SEVERITY_RANK[highest_severity] > _SEVERITY_RANK[pending.severity]:
                 self._upgrade_segment(pending, frame_time, highest_severity)
+                notify_op = "update"
 
             for obj_id, label, _ in contributing:
                 pending.detections[obj_id] = label
@@ -219,6 +239,8 @@ class ReviewSegmentMaintainer:
                     pending.objects.add(label)
             pending.last_activity_time = frame_time
             self._save(pending, end_time=None)
+            if notify_op is not None:
+                self._notify(pending.id, notify_op)
 
         elif pending is not None:
             elapsed = frame_time - pending.last_activity_time
@@ -253,6 +275,7 @@ class ReviewSegmentMaintainer:
 
     def _end_segment(self, pending: PendingReviewSegment, frame_time: float) -> None:
         self._save(pending, end_time=frame_time)
+        self._notify(pending.id, "update")
         del self._pending[pending.camera]
         logger.debug("%s: review segment %s ended", pending.camera, pending.id)
 

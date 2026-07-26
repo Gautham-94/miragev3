@@ -70,6 +70,10 @@ export class ApiService {
     return `${this.base}/api/events/${encodeURIComponent(id)}/snapshot`;
   }
 
+  eventClipUrl(id: string): string {
+    return `${this.base}/api/events/${encodeURIComponent(id)}/clip`;
+  }
+
   listRecordings(params: RecordingListParams = {}): Observable<Recording[]> {
     return this.http.get<Recording[]>(`${this.base}/api/recordings`, { params: toHttpParams(params) });
   }
@@ -199,13 +203,24 @@ export class ApiService {
     return this.http.delete<void>(`${this.base}/api/config/queries/${encodeURIComponent(id)}`);
   }
 
-  listQueryMatches(params: { camera?: string; queryId?: string; limit?: number } = {}): Observable<QueryMatch[]> {
+  listQueryMatches(
+    params: { camera?: string; queryId?: string; limit?: number; offset?: number } = {},
+  ): Observable<QueryMatch[]> {
     return this.http.get<QueryMatch[]>(`${this.base}/api/query-matches`, {
-      params: toHttpParams({ camera: params.camera, query_id: params.queryId, limit: params.limit }),
+      params: toHttpParams({
+        camera: params.camera,
+        query_id: params.queryId,
+        limit: params.limit,
+        offset: params.offset,
+      }),
     });
   }
 
   queryMatchThumbnailUrl(id: string): string {
     return `${this.base}/api/query-matches/${encodeURIComponent(id)}/thumbnail`;
+  }
+
+  eventsStreamUrl(): string {
+    return `${this.base}/api/events/stream`;
   }
 }

@@ -38,9 +38,9 @@
             <button
               type="button"
               class="video-link-btn"
-              (click)="$event.stopPropagation(); viewVideo(event)"
-              aria-label="View video of this moment"
-              title="View video of this moment"
+              (click)="$event.stopPropagation(); playClip(event)"
+              aria-label="Play video of this moment"
+              title="Play video of this moment"
             >
               <app-icon name="play" [size]="14" />
             </button>
@@ -65,6 +65,13 @@
         </button>
       }
     </div>
+    @if (hasMore()) {
+      <div class="load-more-row">
+        <button type="button" class="load-more-btn" (click)="loadMore()" [disabled]="loadingMore()">
+          {{ loadingMore() ? 'Loading…' : 'Load more' }}
+        </button>
+      </div>
+    }
   }
 </div>
 
@@ -91,9 +98,29 @@
     <span class="lightbox-dot">·</span>
     <span class="mono">{{ formatTime(event.start_time) }}</span>
     <span class="lightbox-dot">·</span>
-    <button type="button" class="lightbox-video-btn" (click)="viewVideo(event)">
+    <button type="button" class="lightbox-video-btn" (click)="playClip(event)">
       <app-icon name="play" [size]="14" />
       View video
     </button>
   </app-lightbox>
+}
+
+@if (clipError()) {
+  <div class="inline-error clip-error-banner">{{ clipError() }}</div>
+}
+
+@if (playingClip(); as event) {
+  <app-video-lightbox
+    [videoUrl]="clipUrl(event)"
+    [downloadUrl]="clipUrl(event)"
+    [downloadName]="clipDownloadName(event)"
+    (closed)="closeClip()"
+    (videoError)="onClipError()"
+  >
+    <span class="lightbox-label">{{ event.label }}</span>
+    <span class="lightbox-dot">·</span>
+    <span>{{ event.camera }}</span>
+    <span class="lightbox-dot">·</span>
+    <span class="mono">{{ formatTime(event.start_time) }}</span>
+  </app-video-lightbox>
 }
