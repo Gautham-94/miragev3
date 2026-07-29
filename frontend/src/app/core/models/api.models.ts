@@ -161,6 +161,13 @@ export interface CameraWriteRequest {
   // queue-wait-time -- one rule, see RulesConfig.dwell_seconds for why).
   crowd_threshold?: number | null;
   dwell_seconds?: number | null;
+  // See mirage.config.schema.ObjectFilterConfig's docstring -- min_score gates whether a
+  // raw detection is tracked at all; threshold gates whether a tracked object's median
+  // score is ever promoted from false_positive to true-positive (and therefore shown in
+  // Events/Review). Both undefined/null keep ObjectFilterConfig's own schema defaults
+  // (0.5/0.7).
+  min_score?: number | null;
+  threshold?: number | null;
 }
 
 export interface CameraConfigDetail {
@@ -182,6 +189,8 @@ export interface CameraConfigDetail {
   openvocab_direct_frame: boolean;
   crowd_threshold: number | null;
   dwell_seconds: number | null;
+  min_score: number;
+  threshold: number;
 }
 
 export interface ConfigMutationResponse {

@@ -1044,3 +1044,64 @@ unrelated to the supervisor/restart mechanism itself.
 `.scss`, `frontend/src/app/core/services/api.service.ts`,
 `frontend/src/app/core/models/api.models.ts` (`SystemState`/`SystemStatus`),
 `tests/test_supervisor.py` (new), `tests/test_api_system.py` (new).
+
+---
+
+## 13. `mainstream` camera — a single stationary person fragments into many separate
+    Events instead of one continuous one
+
+**Status:** open, investigated but not yet fixed -- user asked to add this to todo after
+the diagnosis below.
+
+**Symptom:** a single person sitting still at a desk on the `mainstream` camera from
+10:05:51 to 10:12:48 (2026-07-29) generated 15+ separate `Event` rows instead of one
+continuous event, each with low/jittery confidence (`score` medians 0.45-0.65,
+`top_score` peaks up to 0.79). User suspected a tracking regression (previously a
+stationary person was one continuous track).
+
+**Root cause (confirmed via investigation, not yet acted on):** not a regression --
+`git log` shows `mirage/tracking/tracker.py`, `mirage/regions/*`, and the norfair
+distance/matching logic are byte-for-byte unchanged since the initial commit; the V3
+commit (species/PTZ) only touched unrelated PTZ-bypass branches and species-dispatch
+hooks. The actual mechanism:
+
+- `mainstream`'s detector confidence for this person is low and jittery (dim indoor
+  lighting, person partially occluded by a desk/table, not filling much of the frame) --
+  a genuinely hard scene for the model, not a bug. `front_door` uses the identical
+  detector (`zilodetector`, 768x768 input) at the same 1920x1080 detect resolution and
+  scores 0.85-0.91 on its (easier, well-lit, large-subject) footage, confirming this is
+  scene-difficulty, not a resolution/pipeline problem.
+- When confidence dips below `min_score` for longer than `max_disappeared` (fixed at
+  `fps * 5` = 5s at mainstream's 5 fps -- see `mirage/tracking/config.py`'s
+  `max_disappeared()`), norfair (`mirage/tracking/tracker.py`) drops the track entirely.
+  The next re-detection gets a brand-new `obj_id`, so `EventProcessor` (which just diffs
+  tracked-object ids frame to frame, no stationary-awareness) starts a new `Event` --
+  fragmenting one continuous presence into many.
+- Separately confirmed as real but unrelated dead code / latent bugs, found along the
+  way (not yet fixed, worth doing eventually): `CameraConfig.min_initialized` /
+  `max_disappeared` / `stationary_threshold` properties (`mirage/config/schema.py`) are
+  never actually read anywhere -- only the pure-fps-derived free functions in
+  `mirage/tracking/config.py` are used -- so a user setting these per-camera in config
+  would silently do nothing. `stationary_interval` has no consumer at all.
+
+**Candidate fixes (not yet chosen/planned in detail):**
+1. **Make `max_disappeared` actually configurable per-camera** (wire up the
+   currently-dead `CameraConfig.max_disappeared` property into `ObjectTracker`'s
+   construction in `mirage/tracking/camera_tracker.py`), so a noisy/hard-scene camera
+   like `mainstream` can tolerate a longer gap (e.g. 15-20s) before dropping a track,
+   without affecting other cameras.
+2. Separately investigate whether a larger/different detector (the existing `general`
+   detector, already used by `backyard`) or a detect resolution closer to the model's
+   native 768x768 input improves confidence on this specific hard scene -- independent
+   of the tracker-tolerance fix above, since both symptoms (low confidence AND
+   short-gap-triggered fragmentation) stem from the same root cause but can be addressed
+   separately.
+
+**Relevant files:** `mirage/tracking/config.py` (`max_disappeared(fps)`,
+`min_initialized(fps)`, `stationary_threshold_frames(fps)` -- currently pure-fps
+formulas, no per-camera override), `mirage/tracking/camera_tracker.py` (constructs
+`ObjectTracker(fps=camera.detect.fps)`, would need to also pass a per-camera override if
+config.schema's dead properties are wired up), `mirage/config/schema.py`
+(`CameraConfig.min_initialized`/`max_disappeared`/`stationary_threshold` properties --
+currently dead, never read), `mirage/tracking/tracker.py` (`ObjectTracker.__init__`,
+where `hit_counter_max=max_disappeared(self.fps)` is passed to norfair today).

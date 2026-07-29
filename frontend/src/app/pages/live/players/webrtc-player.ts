@@ -17,21 +17,28 @@
  *      addIceCandidate).
  */
 
-const ICE_SERVERS: RTCIceServer[] = [
-  { urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.l.google.com:19302'] },
-];
+// go2rtc and the browser are both on the LAN (or the same machine) in this deployment --
+// a public STUN server only matters for NAT traversal across the open internet, and
+// including one here has been observed to make Chrome prioritize a srflx candidate pair
+// through the public-facing IP over the perfectly good host candidate pair on the LAN,
+// stalling ICE instead of just using the direct route. No STUN server needed for a
+// same-network peer.
+const ICE_SERVERS: RTCIceServer[] = [];
 
 export class WebRtcPlayer {
   private ws: WebSocket | null = null;
   private pc: RTCPeerConnection | null = null;
   private destroyed = false;
+  private readonly camDebugLabel: string;
 
   constructor(
     private readonly videoEl: HTMLVideoElement,
     private readonly wsUrl: string,
     private readonly onError: () => void,
     private readonly onPlaying: () => void,
-  ) {}
+  ) {
+    this.camDebugLabel = wsUrl;
+  }
 
   static isSupported(): boolean {
     return typeof RTCPeerConnection !== 'undefined';
@@ -44,16 +51,42 @@ export class WebRtcPlayer {
     this.pc.addTransceiver('audio', { direction: 'recvonly' });
 
     this.pc.addEventListener('track', (event) => {
+      console.log('[webrtc]', this.camDebugLabel, 'track event', event.track.kind);
       if (this.videoEl.srcObject !== event.streams[0]) {
         this.videoEl.srcObject = event.streams[0];
+        // Some browsers don't reliably auto-start playback on a srcObject assigned from
+        // a WebRTC track even with the autoplay attribute set -- kick it explicitly and
+        // surface anything blocking it (e.g. an autoplay policy rejection).
+        this.videoEl.play().catch((err) => {
+          console.log('[webrtc]', this.camDebugLabel, 'video.play() rejected', err);
+        });
       }
     });
-    this.videoEl.addEventListener('playing', () => this.onPlaying(), { once: true });
+    this.videoEl.addEventListener('playing', () => {
+      console.log('[webrtc]', this.camDebugLabel, 'video element playing');
+      this.onPlaying();
+    }, { once: true });
+    this.videoEl.addEventListener('loadedmetadata', () => {
+      console.log('[webrtc]', this.camDebugLabel, 'loadedmetadata', this.videoEl.videoWidth, this.videoEl.videoHeight);
+    }, { once: true });
+    this.videoEl.addEventListener('canplay', () => {
+      console.log('[webrtc]', this.camDebugLabel, 'canplay, paused=', this.videoEl.paused, 'readyState=', this.videoEl.readyState);
+    }, { once: true });
+    this.videoEl.addEventListener('error', () => {
+      console.log('[webrtc]', this.camDebugLabel, 'video element error', this.videoEl.error);
+    });
 
     this.pc.addEventListener('connectionstatechange', () => {
+      console.log('[webrtc]', this.camDebugLabel, 'connectionState ->', this.pc?.connectionState);
       if (this.pc?.connectionState === 'failed' || this.pc?.connectionState === 'closed') {
         this.onError();
       }
+    });
+    this.pc.addEventListener('iceconnectionstatechange', () => {
+      console.log('[webrtc]', this.camDebugLabel, 'iceConnectionState ->', this.pc?.iceConnectionState);
+    });
+    this.pc.addEventListener('icegatheringstatechange', () => {
+      console.log('[webrtc]', this.camDebugLabel, 'iceGatheringState ->', this.pc?.iceGatheringState);
     });
 
     this.pc.addEventListener('icecandidate', (event) => {
@@ -70,8 +103,12 @@ export class WebRtcPlayer {
       this.send({ type: 'webrtc/offer', value: offer.sdp ?? '' });
     });
     this.ws.addEventListener('message', (event) => this.onMessage(event));
-    this.ws.addEventListener('error', () => this.onError());
-    this.ws.addEventListener('close', () => {
+    this.ws.addEventListener('error', (e) => {
+      console.log('[webrtc]', this.camDebugLabel, 'ws error', e);
+      this.onError();
+    });
+    this.ws.addEventListener('close', (e) => {
+      console.log('[webrtc]', this.camDebugLabel, 'ws close', e.code, e.reason);
       if (!this.destroyed) this.onError();
     });
   }
@@ -87,12 +124,13 @@ export class WebRtcPlayer {
     if (!this.pc) return;
 
     if (msg.type === 'webrtc/answer' && msg.value) {
+      console.log('[webrtc]', this.camDebugLabel, 'got answer, setting remote description');
       await this.pc.setRemoteDescription({ type: 'answer', sdp: msg.value });
     } else if (msg.type === 'webrtc/candidate' && msg.value) {
       try {
         await this.pc.addIceCandidate({ candidate: msg.value, sdpMid: '0' });
-      } catch {
-        // A stray/late candidate arriving after the connection settled is harmless.
+      } catch (err) {
+        console.log('[webrtc]', this.camDebugLabel, 'addIceCandidate failed', err);
       }
     }
   }
