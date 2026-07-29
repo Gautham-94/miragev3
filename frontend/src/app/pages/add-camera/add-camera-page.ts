@@ -93,6 +93,14 @@ export class AddCameraPage implements OnInit {
   // for at least this long (covers both loitering and queue-wait-time).
   protected readonly crowdThreshold = signal<number | null>(null);
   protected readonly dwellSeconds = signal<number | null>(null);
+  // See ObjectFilterConfig's own docstring -- minScore gates whether a raw detection is
+  // tracked at all; confirmScore gates whether a tracked object's median score is ever
+  // promoted from false_positive to true-positive (and therefore shown in Events/
+  // Review). Named confirmScore in the UI ("threshold" alone reads ambiguous next to
+  // Min score) but maps to the backend's `threshold` field. Defaults mirror
+  // ObjectFilterConfig's own schema defaults (0.5/0.7) for a brand-new camera.
+  protected readonly minScore = signal(0.5);
+  protected readonly confirmScore = signal(0.7);
 
   protected readonly detectors = signal<Detector[]>([]);
   protected readonly saving = signal(false);
@@ -151,6 +159,8 @@ export class AddCameraPage implements OnInit {
           this.openvocabDirectFrame.set(cam.openvocab_direct_frame);
           this.crowdThreshold.set(cam.crowd_threshold);
           this.dwellSeconds.set(cam.dwell_seconds);
+          this.minScore.set(cam.min_score);
+          this.confirmScore.set(cam.threshold);
           this.step.set('details');
         },
         error: (err) => {
@@ -294,6 +304,8 @@ export class AddCameraPage implements OnInit {
       openvocab_direct_frame: this.openvocabDirectFrame(),
       crowd_threshold: this.crowdThreshold(),
       dwell_seconds: this.dwellSeconds(),
+      min_score: this.minScore(),
+      threshold: this.confirmScore(),
     };
 
     const request = this.isEditMode

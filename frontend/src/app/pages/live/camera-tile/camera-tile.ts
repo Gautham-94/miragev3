@@ -22,11 +22,12 @@ const SNAPSHOT_POLL_MS = 1000;
 type PlayerMode = 'connecting' | 'mse' | 'webrtc' | 'poster' | 'error';
 
 /**
- * Tiered live player, mirroring Frigate's own LivePlayer fallback chain: prefer MSE
- * (lowest overhead, works in most desktop/Android browsers), fall back to WebRTC if MSE
- * isn't supported or fails to start, and fall back to a polled JPEG snapshot poster if
- * neither real-video tier connects (e.g. go2rtc unreachable). The poster is also what
- * renders during the "connecting" window before either player has started playing.
+ * Tiered live player: prefer WebRTC (sub-second latency -- it's the real-time transport;
+ * MSE buffers several frames of fmp4 before playback starts, typically adding 1-3s), fall
+ * back to MSE if WebRTC isn't supported or fails to connect (e.g. UDP blocked by a
+ * restrictive network), and fall back to a polled JPEG snapshot poster if neither
+ * real-video tier connects (e.g. go2rtc unreachable). The poster is also what renders
+ * during the "connecting" window before either player has started playing.
  */
 @Component({
   selector: 'app-camera-tile',
@@ -43,8 +44,8 @@ export class CameraTile implements AfterViewInit, OnDestroy {
   protected readonly mode = signal<PlayerMode>('connecting');
   protected readonly snapshotUrl = signal<string | null>(null);
 
-  private mse: MsePlayer | null = null;
   private webrtc: WebRtcPlayer | null = null;
+  private mse: MsePlayer | null = null;
   // Started/stopped as mode() transitions in/out of 'mse'/'webrtc' -- see
   // startSnapshotPolling/stopSnapshotPolling. The snapshot poster is only ever
   // rendered while mode() is 'connecting'/'poster'/'error' (see camera-tile.html's
@@ -92,44 +93,44 @@ export class CameraTile implements AfterViewInit, OnDestroy {
 
     const wsUrl = this.api.liveWebSocketUrl(this.camera().name);
 
-    if (MsePlayer.isSupported()) {
-      this.mse = new MsePlayer(
+    if (WebRtcPlayer.isSupported()) {
+      this.webrtc = new WebRtcPlayer(
         videoEl,
         wsUrl,
-        () => this.onTierFailed('mse'),
-        () => this.setMode('mse'),
+        () => this.onTierFailed('webrtc'),
+        () => this.setMode('webrtc'),
       );
-      this.mse.start();
+      this.webrtc.start();
     } else {
-      this.tryWebRtc(videoEl, wsUrl);
+      this.tryMse(videoEl, wsUrl);
     }
   }
 
   private onTierFailed(failedTier: 'mse' | 'webrtc'): void {
-    if (failedTier === 'mse') {
-      this.mse?.destroy();
-      this.mse = null;
-      const videoEl = this.videoElRef?.nativeElement;
-      if (videoEl) this.tryWebRtc(videoEl, this.api.liveWebSocketUrl(this.camera().name));
-    } else {
+    if (failedTier === 'webrtc') {
       this.webrtc?.destroy();
       this.webrtc = null;
+      const videoEl = this.videoElRef?.nativeElement;
+      if (videoEl) this.tryMse(videoEl, this.api.liveWebSocketUrl(this.camera().name));
+    } else {
+      this.mse?.destroy();
+      this.mse = null;
       this.setMode('error');
     }
   }
 
-  private tryWebRtc(videoEl: HTMLVideoElement, wsUrl: string): void {
-    if (!WebRtcPlayer.isSupported()) {
+  private tryMse(videoEl: HTMLVideoElement, wsUrl: string): void {
+    if (!MsePlayer.isSupported()) {
       this.setMode('error');
       return;
     }
-    this.webrtc = new WebRtcPlayer(
+    this.mse = new MsePlayer(
       videoEl,
       wsUrl,
-      () => this.onTierFailed('webrtc'),
-      () => this.setMode('webrtc'),
+      () => this.onTierFailed('mse'),
+      () => this.setMode('mse'),
     );
-    this.webrtc.start();
+    this.mse.start();
   }
 
   private refreshSnapshot(): void {

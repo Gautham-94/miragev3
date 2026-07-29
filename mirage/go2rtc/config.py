@@ -66,7 +66,14 @@ def build_go2rtc_config(
     return {
         "streams": streams,
         "api": {"listen": f":{api_port}"},
-        "webrtc": {"listen": f":{webrtc_port}"},
+        # go2rtc defaults to its own public STUN servers for ICE candidate gathering.
+        # The browser and go2rtc are always on the same LAN (or the same machine) in
+        # this deployment, so a public STUN server only adds a slower, NAT-traversal
+        # srflx candidate pair that Chrome can end up preferring over the direct host
+        # candidate pair, stalling connection setup instead of just using the LAN route.
+        # An empty ice_servers list disables that default so only host candidates are
+        # offered.
+        "webrtc": {"listen": f":{webrtc_port}", "ice_servers": []},
         # go2rtc's own logging is noisy at default level; keep it to warnings so it
         # doesn't drown out mirage's own process logs when both run in the foreground.
         "log": {"format": "text", "level": "warn"},

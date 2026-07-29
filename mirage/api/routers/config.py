@@ -37,6 +37,7 @@ from mirage.config.schema import (
     InputDType,
     ModelConfig,
     MirageConfig,
+    ObjectFilterConfig,
     ObjectsConfig,
     OpenVocabQuery,
     PixelFormat,
@@ -114,6 +115,16 @@ class CameraWriteRequest(BaseModel):
     # present for at least this long (covers both loitering and queue-wait-time).
     crowd_threshold: int | None = Field(default=None, ge=1)
     dwell_seconds: int | None = Field(default=None, ge=1)
+    # See ObjectFilterConfig's own docstring -- min_score gates whether a raw detection
+    # is tracked at all; threshold gates whether a tracked object's median score is ever
+    # promoted from false_positive to true-positive (and therefore shown in Events/
+    # Review). None (default) keeps ObjectFilterConfig's own schema defaults (0.5/0.7).
+    # Exposed per-camera, not per-detector: two cameras routed to the identical model can
+    # legitimately need different thresholds (e.g. one mounted far from the action scores
+    # lower on genuine detections than one close-up), so this is a scene-confidence
+    # tuning knob, not a property of the model itself.
+    min_score: float | None = Field(default=None, ge=0, le=1)
+    threshold: float | None = Field(default=None, ge=0, le=1)
 
 
 class ConfigMutationResponse(BaseModel):
@@ -155,6 +166,8 @@ class CameraConfigOut(BaseModel):
     openvocab_direct_frame: bool
     crowd_threshold: int | None
     dwell_seconds: int | None
+    min_score: float
+    threshold: float
 
 
 def _primary_input(cam: CameraConfig) -> CameraInputConfig | None:
@@ -196,6 +209,14 @@ def _camera_config_out(cam: CameraConfig) -> CameraConfigOut:
         openvocab_direct_frame=cam.openvocab_direct_frame,
         crowd_threshold=cam.rules.crowd_threshold,
         dwell_seconds=cam.rules.dwell_seconds,
+        # objects.filters is keyed per-label (ObjectsConfig.filter_for), not a single
+        # camera-wide value -- this form edits one shared confidence bar applied to every
+        # currently-tracked label uniformly (see _build_camera_config), so reading back
+        # any one tracked label's filter (they're always written identically by this
+        # form) reflects the same value. Untracked/never-customized labels fall back to
+        # ObjectFilterConfig()'s own schema defaults via filter_for.
+        min_score=cam.objects.filter_for(cam.objects.track[0]).min_score if cam.objects.track else ObjectFilterConfig().min_score,
+        threshold=cam.objects.filter_for(cam.objects.track[0]).threshold if cam.objects.track else ObjectFilterConfig().threshold,
     )
 
 
@@ -304,12 +325,23 @@ def _build_camera_config(req: CameraWriteRequest) -> CameraConfig:
     if req.detection_labels is not None:
         review_kwargs["detections"] = ReviewLabelConfig(labels=req.detection_labels)
 
+    filters_kwargs = {}
+    if req.min_score is not None:
+        filters_kwargs["min_score"] = req.min_score
+    if req.threshold is not None:
+        filters_kwargs["threshold"] = req.threshold
+    # ObjectsConfig.filters is keyed per-label (see ObjectsConfig.filter_for) -- this
+    # form edits one shared confidence bar, applied uniformly to every label this camera
+    # tracks, rather than exposing per-label overrides the wizard has no UI for.
+    shared_filter = ObjectFilterConfig(**filters_kwargs) if filters_kwargs else ObjectFilterConfig()
+    filters = {label: shared_filter for label in req.track_objects}
+
     return CameraConfig(
         name=req.name,
         enabled=req.enabled,
         ffmpeg=FfmpegConfig(inputs=[CameraInputConfig(path=req.rtsp_url, rtsp_transport=req.rtsp_transport)]),
         detect=DetectConfig(width=req.width, height=req.height, fps=req.fps),
-        objects=ObjectsConfig(track=req.track_objects, track_all=req.track_all),
+        objects=ObjectsConfig(track=req.track_objects, track_all=req.track_all, filters=filters),
         record=RecordConfig(
             enabled=req.record_enabled, segment_seconds=req.segment_seconds, continuous=RetainConfig(days=req.retain_days)
         ),

@@ -307,6 +307,40 @@
           waiting in a queue. Leave either blank to disable it.
         </p>
 
+        <div class="field-row">
+          <label class="field">
+            <span>Min detection score</span>
+            <input
+              type="number"
+              [ngModel]="minScore()"
+              (ngModelChange)="minScore.set($event)"
+              name="minScore"
+              min="0"
+              max="1"
+              step="0.05"
+            />
+          </label>
+          <label class="field">
+            <span>Confirm score (shows in Events/Review)</span>
+            <input
+              type="number"
+              [ngModel]="confirmScore()"
+              (ngModelChange)="confirmScore.set($event)"
+              name="confirmScore"
+              min="0"
+              max="1"
+              step="0.05"
+            />
+          </label>
+        </div>
+        <p class="form-hint">
+          Min detection score: a raw detection below this confidence is discarded immediately. Confirm score: a
+          tracked object's confidence has to clear this bar (its running median, not just one lucky frame) before
+          it's treated as a real detection and appears in Events/Review — a low-confidence blip stays hidden as a
+          false positive forever. Lower this if a real camera (e.g. one mounted far from the action) is
+          consistently scoring below the default 0.7 on genuine detections.
+        </p>
+
         @if (saveError()) {
           <div class="inline-error">{{ saveError() }}</div>
         }

@@ -71,6 +71,8 @@ export class ManageCamerasPage implements OnInit {
         detection_labels: camera.detection_labels,
         enabled: nextEnabled,
         rtsp_transport: camera.rtsp_transport,
+        min_score: camera.min_score,
+        threshold: camera.threshold,
       })
       .subscribe({
         next: () => {
