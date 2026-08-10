@@ -229,21 +229,6 @@
           A tracked label in neither list is recorded (Events/Recordings) but never surfaces on Review/Alerts.
         </p>
 
-        <label class="checkbox-field">
-          <input
-            type="checkbox"
-            [ngModel]="openvocabDirectFrame()"
-            (ngModelChange)="openvocabDirectFrame.set($event)"
-            name="openvocabDirectFrame"
-          />
-          <span>Check open-vocabulary queries against the whole frame</span>
-        </label>
-        <p class="form-hint">
-          On (queries checked directly against the full motion-triggered frame) for things the detector above was
-          never trained to recognize as an object at all. Off (default) only checks crops of objects the detector
-          already confirmed.
-        </p>
-
         <div class="field-row">
           <label class="field">
             <span>Width</span>
@@ -371,18 +356,6 @@
           {{ isEditMode ? 'These changes' : 'This camera' }} won't take effect until you
           apply pending changes — use the "Apply changes" button to restart the pipeline.
         </p>
-        @if (savedOpenVocabTerms().length > 0) {
-          <p class="open-vocab-note">
-            <app-icon name="wifi" [size]="14" />
-            @if (savedOpenVocabTerms().length === 1) {
-              "{{ savedOpenVocabTerms()[0] }}" isn't in this camera's detector's vocabulary —
-            } @else {
-              {{ savedOpenVocabTerms().join(', ') }} aren't in this camera's detector's vocabulary —
-            }
-            checking {{ savedOpenVocabTerms().length === 1 ? 'it' : 'them' }} via open-vocabulary search
-            against the whole frame instead. See the Queries page to review or add more.
-          </p>
-        }
         <div class="form-actions centered">
           @if (isEditMode) {
             <button type="button" class="btn-primary" (click)="goToManageCameras()">Back to cameras</button>

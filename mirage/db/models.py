@@ -116,27 +116,4 @@ class AppConfig(BaseModel):
     updated_at = DateTimeField(default=utcnow)
 
 
-class QueryMatch(BaseModel):
-    """One saved open-vocabulary query (mirage.config.schema.OpenVocabQuery) matching a
-    tracked object on a camera, per TODO_FIX_LIST.md items 4/6's design: the fast
-    YOLOv8n detector + tracker confirms an object, a cheap perceptual-hash gate decides
-    whether it's changed enough since last checked, and only then is its crop sent to
-    the OWLv2 open-vocab process (mirage/openvocab/process.py) to check against every
-    enabled query scoped to that camera. A dedicated table (rather than folding this
-    into Event.data) so matches are independently queryable/listable/filterable by
-    query/camera/time without JSON-scanning every event row -- this is the "show match
-    found" list the Queries page is built around, not per-event metadata.
-    """
-
-    id = CharField(primary_key=True, max_length=64)
-    query_id = CharField(index=True)
-    query_text = CharField()  # denormalized snapshot -- survives the query being edited/deleted later
-    camera = CharField(index=True)
-    object_id = CharField(index=True)  # TrackedObjectState.id this match is for
-    matched_at = DateTimeField(index=True, default=utcnow)
-    score = FloatField(default=0.0)  # OWLv2's own confidence for this box
-    box = JSONField(default=list)  # [y1, x1, y2, x2], full-frame pixel coords
-    thumb_path = CharField(null=True)
-
-
-ALL_MODELS = [Event, Recordings, ReviewSegment, Timeline, Regions, AppConfig, QueryMatch]
+ALL_MODELS = [Event, Recordings, ReviewSegment, Timeline, Regions, AppConfig]

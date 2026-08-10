@@ -1,13 +1,11 @@
 """SpeciesProcess: the single dedicated OS process that loads the configured species
 classifier once and serves species-classification requests for every camera's
-Animal/Bird events -- mirrors mirage.openvocab.process.OpenVocabProcess's "one process,
-one loaded model, shared via a queue" pattern exactly.
+Animal/Bird events -- "one process, one loaded model, shared via a queue" pattern.
 
-Plain multiprocessing.Queue, not SHM, for the same reason OpenVocabProcess's own module
-docstring gives: species classification only ever fires once per Event's lifetime (at
-Event creation, see mirage.events.processor.EventProcessor._on_start), not per-frame --
-infrequent, small JPEG-crop payloads, inference-latency-dominated. SHM's zero-copy
-benefit doesn't matter at this call volume/payload size.
+Plain multiprocessing.Queue, not SHM: species classification only ever fires once per
+Event's lifetime (at Event creation, see mirage.events.processor.EventProcessor._on_start),
+not per-frame -- infrequent, small JPEG-crop payloads, inference-latency-dominated. SHM's
+zero-copy benefit doesn't matter at this call volume/payload size.
 """
 
 from __future__ import annotations

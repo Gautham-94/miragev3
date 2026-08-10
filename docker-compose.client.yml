@@ -1,0 +1,68 @@
+# Client-distribution compose file: runs the prebuilt mirage images from local .tar
+# files (see scripts/build_and_export_images.sh) -- no source code, no build step, no
+# internet access needed on the client machine to build anything. Load the images first:
+#
+#   docker load -i mirage-pipeline-<version>.tar
+#   docker load -i mirage-api-<version>.tar
+#   docker load -i mirage-frontend-<version>.tar
+#
+# then:
+#
+#   docker compose -f docker-compose.client.yml up -d
+#
+# Update the image: tags below if you exported with a version other than "latest".
+services:
+  pipeline:
+    image: mirage-pipeline:latest
+    shm_size: "2gb"
+    # NVIDIA GPU passthrough. Requires: the NVIDIA driver installed on the host, and GPU
+    # support enabled in Docker Desktop (Windows: Settings > Resources > WSL
+    # Integration). If you don't have a GPU, delete this whole `deploy:` block -- the
+    # image still works CPU-only, just slower.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - config:/data/config
+      - media:/data/media
+      - cache:/data/cache
+      - go2rtc-bin:/data/go2rtc-bin
+      # Drop/swap .onnx + labelmap files in this folder, then point each detector's
+      # model_path/labelmap_path (Manage Detectors page) at e.g. /data/models/best.onnx.
+      - ./models:/data/models
+      # SpeciesNet's downloaded model weights (kagglehub) -- persists across restarts.
+      - speciesnet-cache:/root/.cache/kagglehub
+    ports:
+      - "1984:1984" # go2rtc API/HTTP
+      - "8555:8555" # go2rtc WebRTC
+    restart: unless-stopped
+
+  api:
+    image: mirage-api:latest
+    volumes:
+      - config:/data/config
+      - media:/data/media
+      - cache:/data/cache
+      - ./models:/data/models
+    depends_on:
+      - pipeline
+    restart: unless-stopped
+
+  frontend:
+    image: mirage-frontend:latest
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  config:
+  media:
+  cache:
+  go2rtc-bin:
+  speciesnet-cache:

@@ -1,8 +1,17 @@
 # mirage pipeline image: python -m mirage.supervisor (capture/detect/track/record +
 # go2rtc). Separate from Dockerfile.api/Dockerfile.frontend per the multi-container
-# design -- this is the heaviest image (numpy/opencv/torch/onnxruntime) and the one
-# that owns ffmpeg subprocesses, shared memory, and the actual camera connections.
-FROM python:3.12-slim
+# design -- this is the heaviest image (numpy/opencv/onnxruntime) and the one that owns
+# ffmpeg subprocesses, shared memory, and the actual camera connections.
+#
+# GPU build: base image is nvidia/cuda (with cuDNN, which onnxruntime-gpu's
+# CUDAExecutionProvider needs) instead of plain python:3.12-slim, so this container can
+# actually drive an NVIDIA GPU passed through via docker-compose.yml's `deploy.resources
+# .reservations.devices` (Windows: Docker Desktop + WSL2 GPU support + host NVIDIA
+# driver). Needs no CPU fallback build any more -- mirage/detection/execution_providers.py
+# already auto-detects CUDA and falls back to CPU execution providers at runtime if no
+# GPU is actually present, so this same image still runs fine on a GPU-less host, just
+# slower.
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 
 # ffmpeg: required at runtime by every camera's capture/record ffmpeg subprocess
 # (mirage/capture/, mirage/recording/) -- not a Python dependency, must come from apt.
@@ -10,34 +19,73 @@ FROM python:3.12-slim
 # mirage/go2rtc/download.py (ensure_go2rtc_binary), which already auto-detects
 # linux/amd64 or linux/arm64 and downloads the correct release asset -- no manual
 # binary swap needed, unlike the macOS dev binary checked into bin/ for local use.
+# python3/python3-pip: the CUDA base image has no Python at all, unlike python:3.12-slim.
+# python3.11-venv: needed to create the SECOND venv below for SpeciesNet (species
+# classification, mirage/species/plugins/speciesnet.py) -- `python3 -m venv` fails
+# without it even though python3-pip is already present.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
     ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    python3.11 \
+    python3-pip \
+    python3.11-venv \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python3 \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python
 
 WORKDIR /app
 
-# Dependencies first (own layer, cached across code-only changes).
-# --extra-index-url pytorch.org/cpu: this container has no GPU, and pip's default index
-# resolves torch==2.12.* to CUDA-bundled wheels (nvidia_cudnn_cu13/nvidia_nccl_cu13/etc,
-# 1GB+ of unused libraries) -- mirage/detection/execution_providers.py already falls back
-# to CPU-only execution providers, so those CUDA wheels would just be dead weight here.
-COPY requirements.txt ./
-RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt
+# Dependencies first (own layer, cached across code-only changes). requirements-gpu.txt
+# swaps onnxruntime for onnxruntime-gpu (see that file's own header comment).
+COPY requirements-gpu.txt requirements.txt ./
+RUN pip install --no-cache-dir -r requirements-gpu.txt
 
 COPY pyproject.toml ./
 COPY mirage ./mirage
-COPY models ./models
 RUN pip install --no-cache-dir -e .
 
+# SpeciesNet (species classification, mirage/species/plugins/speciesnet.py) needs its
+# OWN venv, separate from the one above: the real `speciesnet` PyPI package pulls in
+# yolov5/ultralytics/sahi/roboflow, which require numpy>=2 and the GUI `opencv-python`
+# package -- both conflict irreconcilably with this image's main install (norfair needs
+# numpy<2, and opencv-python-headless is already installed above). Built at
+# /app/.venv-speciesnet to match SpeciesModelConfig.venv_python_path's default
+# (".venv-speciesnet/bin/python", resolved relative to WORKDIR /app) -- no config change
+# needed for the worker subprocess (mirage/species/speciesnet_worker.py) to find it.
+# Species classification stays optional either way -- config.species_classifier.enabled
+# defaults to False, so this venv sits unused until a user turns it on.
+#
+# --extra-index-url pytorch.org/cpu: speciesnet's own dependency on torch>=2.0 has no
+# CUDA constraint, so pip's default index resolves it to a CUDA-bundled wheel (its own
+# copy of nvidia_cudnn_cu12/nvidia_cublas_cu12/nvidia_nccl_cu12/etc, 2-3GB+) stacked on
+# top of THIS IMAGE'S OWN base-layer CUDA/cuDNN -- pure duplication, since species
+# classification fires once per Event's lifetime (mirage/species/process.py's own
+# docstring), not a hot enough path to justify GPU acceleration here. Forcing the
+# CPU-only wheel index for just this venv avoids that duplication; onnxruntime-gpu
+# (the actual detector, in the OTHER venv above) is unaffected and still uses the
+# base image's real GPU.
+COPY requirements-speciesnet.txt ./
+RUN python3 -m venv .venv-speciesnet \
+    && .venv-speciesnet/bin/pip install --no-cache-dir \
+       --extra-index-url https://download.pytorch.org/whl/cpu \
+       -r requirements-speciesnet.txt
+
+# No models/ COPY here on purpose: model + labelmap files are NOT baked into the image.
+# docker-compose.yml bind-mounts a host folder at /data/models instead, and you point
+# each detector's model_path/labelmap_path (via the frontend's Manage Detectors page, or
+# POST /api/config/detectors) at a container-side path under /data/models -- e.g.
+# /data/models/best.onnx. Drop/swap files in the host folder and they show up there
+# immediately, no image rebuild needed; only re-saving the detector config in the UI is
+# required to pick up a changed path.
+#
 # CACHE_DIR/RECORD_DIR/CONFIG_DIR/MODEL_CACHE_DIR/GO2RTC_BIN_DIR are all overridden via
 # env vars in docker-compose.yml (see mirage/const.py's own env-var-driven defaults) --
 # these just give the image sane standalone defaults if run without compose.
 ENV MIRAGE_CACHE_DIR=/data/cache \
     MIRAGE_BASE_DIR=/data/media \
     MIRAGE_CONFIG_DIR=/data/config \
-    MIRAGE_MODEL_CACHE_DIR=/app/models \
+    MIRAGE_MODEL_CACHE_DIR=/data/models \
     MIRAGE_GO2RTC_BIN_DIR=/data/go2rtc-bin \
     PYTHONUNBUFFERED=1
 

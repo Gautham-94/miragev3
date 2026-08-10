@@ -1,7 +1,7 @@
 """Tests for mirage/tracking/rules.py -- RulesEngine, the crowd-count and dwell-time/
 loitering derived-condition alerts (TODO_FIX_LIST.md item 7.4). Pure in-memory logic,
 no DB/SHM/subprocess involved -- these tests feed synthetic TrackedObjectState dicts
-directly, same as test_openvocab_dispatcher.py does for its own synthetic-track logic.
+directly.
 """
 
 from __future__ import annotations

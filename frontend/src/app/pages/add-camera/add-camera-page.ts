@@ -82,11 +82,6 @@ export class AddCameraPage implements OnInit {
   // Hikvision camera: a single, otherwise-idle TCP RTSP session was reset by the camera
   // after ~2 seconds every time, while the same stream over UDP ran stable).
   protected readonly rtspTransport = signal<RtspTransport>('tcp');
-  // False (default): open-vocab queries only ever check crops of objects the closed-
-  // vocab detector already confirmed. True: this camera's queries are checked directly
-  // against the whole motion-triggered frame instead -- for open-vocab items outside
-  // that detector's label map entirely (see CameraConfig.openvocab_direct_frame).
-  protected readonly openvocabDirectFrame = signal(false);
   // Both empty string (disabled) by default -- see RulesConfig's own docstring.
   // crowdThreshold: alert once this many confirmed "person" tracks are present at
   // once. dwellSeconds: alert once ANY tracked object has been continuously present
@@ -106,12 +101,6 @@ export class AddCameraPage implements OnInit {
   protected readonly saving = signal(false);
   protected readonly saveError = signal<string | null>(null);
   protected readonly savedCameraName = signal<string | null>(null);
-  // Which Track objects words the backend routed to open-vocabulary search instead of
-  // this camera's closed-vocab detector (see ConfigMutationResponse.open_vocab_terms) --
-  // only known after a save round-trip, shown on the "done" step so the user isn't left
-  // wondering whether "animals" silently did nothing (TODO_FIX_LIST.md item 4's original
-  // gap: a non-COCO track word used to be a dead config value with zero feedback).
-  protected readonly savedOpenVocabTerms = signal<string[]>([]);
 
   protected readonly canSubmitDetails = computed(() => {
     return (
@@ -156,7 +145,6 @@ export class AddCameraPage implements OnInit {
           this.rtspTransport.set(cam.rtsp_transport);
           this.alertLabelsInput.set(cam.alert_labels.join(', '));
           this.detectionLabelsInput.set(cam.detection_labels.join(', '));
-          this.openvocabDirectFrame.set(cam.openvocab_direct_frame);
           this.crowdThreshold.set(cam.crowd_threshold);
           this.dwellSeconds.set(cam.dwell_seconds);
           this.minScore.set(cam.min_score);
@@ -301,7 +289,6 @@ export class AddCameraPage implements OnInit {
       // "car"] on every single edit+save, which is exactly the bug this field fixes.
       alert_labels: alertLabels,
       detection_labels: detectionLabels,
-      openvocab_direct_frame: this.openvocabDirectFrame(),
       crowd_threshold: this.crowdThreshold(),
       dwell_seconds: this.dwellSeconds(),
       min_score: this.minScore(),
@@ -316,7 +303,6 @@ export class AddCameraPage implements OnInit {
       next: (resp) => {
         this.saving.set(false);
         this.savedCameraName.set(resp.camera.name);
-        this.savedOpenVocabTerms.set(resp.open_vocab_terms);
         this.step.set('done');
       },
       error: (err) => {
@@ -351,10 +337,8 @@ export class AddCameraPage implements OnInit {
     this.detectionLabelsInput.set('');
     this.rtspTransport.set('tcp');
     this.segmentSeconds.set(10);
-    this.openvocabDirectFrame.set(false);
     this.crowdThreshold.set(null);
     this.dwellSeconds.set(null);
     this.savedCameraName.set(null);
-    this.savedOpenVocabTerms.set([]);
   }
 }

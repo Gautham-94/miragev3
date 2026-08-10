@@ -31,9 +31,6 @@ from mirage.go2rtc.process import Go2rtcProcess
 from mirage.ipc.zmq_pubsub import ZmqProxy
 from mirage.logging_bus import ActivityLogWriter, LogEvent
 from mirage.notify_bus import NotifyEvent, NotifyLogWriter
-from mirage.openvocab.device import resolve_device
-from mirage.openvocab.dispatcher import OpenVocabDispatcher
-from mirage.openvocab.process import OpenVocabProcess
 from mirage.recording.maintainer import RecordingMaintainer, run_recording_maintainer_loop
 from mirage.species.dispatcher import SpeciesDispatcher
 from mirage.species.process import SpeciesProcess
@@ -133,20 +130,9 @@ class MirageApp:
         self.record_stop_event = threading.Event()
         self.watchdog: ServiceWatchdog | None = None
 
-        # OpenVocabProcess is only spawned if at least one enabled OpenVocabQuery exists
-        # (see _start_openvocab) -- no point loading a ~600MB OWLv2 model and paying its
-        # startup time if the user hasn't configured any saved query, which is the
-        # common case today (this is a new, opt-in feature -- TODO_FIX_LIST.md items
-        # 4/6). self.openvocab_dispatcher stays None in that case, and
-        # _result_consumer_loop simply skips the open-vocab check step entirely.
-        self.openvocab_process: OpenVocabProcess | None = None
-        self.openvocab_dispatcher: OpenVocabDispatcher | None = None
-        self.openvocab_request_queue = None
-        self.openvocab_result_queue = None
-
-        # SpeciesProcess is only spawned if config.species_classifier.enabled -- mirrors
-        # OpenVocabProcess's own lazy-start reasoning above (no point loading a species
-        # classification model if the user hasn't opted in, which is the default). See
+        # SpeciesProcess is only spawned if config.species_classifier.enabled -- no
+        # point loading a species classification model if the user hasn't opted in,
+        # which is the default. See
         # _start_species_worker. self.species_dispatcher stays None in that case, and
         # EventProcessor._on_start/​_result_consumer_loop simply skip the species step
         # entirely (see mirage.events.processor.EventProcessor.species_dispatcher).
@@ -178,7 +164,6 @@ class MirageApp:
 
         self._preallocate_camera_shm()
         self._start_detectors()
-        self._start_openvocab()
         self._start_species_worker()
         self._start_record_process()
         self._start_cameras()
@@ -270,38 +255,6 @@ class MirageApp:
                     "detector %r: %d worker process(es) sharing one queue, serving cameras %s",
                     detector_name, num_workers, camera_names,
                 )
-
-    def _start_openvocab(self) -> None:
-        """Only spawns OpenVocabProcess if config.openvocab_enabled AND at least one
-        enabled query exists -- see __init__'s docstring on self.openvocab_dispatcher
-        for why this is conditional. openvocab_enabled is checked FIRST and is a hard
-        override: it lets queries stay configured/saved (not disabled/deleted one by
-        one) while still keeping the ~600MB OWLv2 model out of memory entirely, e.g.
-        via the Config page's toggle.
-        """
-        if not self.config.openvocab_enabled:
-            logger.info("openvocab: disabled via config, skipping OWLv2 process startup")
-            return
-
-        active_queries = [q for q in self.config.queries if q.enabled]
-        if not active_queries:
-            logger.info("openvocab: no enabled queries configured, skipping OWLv2 process startup")
-            return
-
-        device = resolve_device("auto")
-        self.openvocab_request_queue = mp.Queue()
-        self.openvocab_result_queue = mp.Queue()
-        self.openvocab_process = OpenVocabProcess(
-            request_queue=self.openvocab_request_queue, result_queue=self.openvocab_result_queue,
-            stop_event=self.stop_event, device=device,
-        )
-        self.openvocab_process.start()
-        self.openvocab_dispatcher = OpenVocabDispatcher(
-            request_queue=self.openvocab_request_queue, result_queue=self.openvocab_result_queue,
-            frame_manager=self.frame_manager,
-        )
-        self.openvocab_dispatcher.notify_queue = self.notify_queue
-        logger.info("openvocab: started (device=%s), %d enabled quer%s", device, len(active_queries), "y" if len(active_queries) == 1 else "ies")
 
     def _start_species_worker(self) -> None:
         """Only spawns SpeciesProcess if config.species_classifier.enabled -- see
@@ -433,8 +386,6 @@ class MirageApp:
     # ------------------------------------------------------------------
 
     def _result_consumer_loop(self) -> None:
-        previous_ids_by_camera: dict[str, set[str]] = {}
-
         while not self.stop_event.is_set():
             try:
                 camera_name, frame_name, frame_time, tracked_objects, motion_boxes, regions, frame_jpeg = (
@@ -449,39 +400,9 @@ class MirageApp:
             if camera is None:
                 continue
 
-            # Merge in any still-live open-vocab synthetic tracks (see
-            # mirage.openvocab.dispatcher.SyntheticTrack's docstring) BEFORE
-            # EventProcessor/ReviewSegmentMaintainer run, so a real OWLv2 match for a
-            # camera's Track objects word (e.g. "animals", auto-provisioned via
-            # mirage.api.routers.config._sync_track_object_queries) or a manual saved
-            # query drives a real Event/ReviewSegment through the exact same
-            # start/update/end diff logic a closed-vocab detection does -- rather than
-            # being a second, disconnected notification path (QueryMatch rows alone,
-            # which is all that existed before this bridge). Built as a SEPARATE dict,
-            # not a mutation of `tracked_objects` itself: the raw tracker-produced dict
-            # is still what openvocab_dispatcher.process_frame needs below (it decides
-            # whether to check GATE 1 using each object's real is_false_positive
-            # status, and synthetic entries are never gate-1 candidates themselves --
-            # they're the dispatcher's OUTPUT, not its input).
-            objects_for_review = tracked_objects
-            synthetic_frame_jpegs: dict[str, bytes] = {}
-            if self.openvocab_dispatcher is not None:
-                synthetic = self.openvocab_dispatcher.synthetic_tracked_objects(camera_name, frame_time)
-                if synthetic:
-                    objects_for_review = {**tracked_objects, **synthetic}
-                    # MUST be called after synthetic_tracked_objects() above for this
-                    # same (camera_name, frame_time) -- see synthetic_frame_jpegs()'s
-                    # own docstring. Gives EventProcessor a per-object clean-frame
-                    # override for direct-frame-mode open-vocab matches, which were
-                    # detected in a completely separate frame than `frame_jpeg`
-                    # (TODO_FIX_LIST.md item 9/11 -- open-vocab Events previously never
-                    # got a real snapshot box at all).
-                    synthetic_frame_jpegs = self.openvocab_dispatcher.synthetic_frame_jpegs(camera_name)
-
             try:
                 self.event_processor.process(
-                    camera, frame_time, objects_for_review, frame_jpeg=frame_jpeg,
-                    object_frame_jpegs=synthetic_frame_jpegs,
+                    camera, frame_time, tracked_objects, frame_jpeg=frame_jpeg,
                 )
 
                 # Rule triggers (crowd count / dwell-time -- mirage.tracking.rules)
@@ -489,32 +410,14 @@ class MirageApp:
                 # per the user's explicit choice, a rule firing surfaces as a
                 # ReviewSegment (severity="rule") on the existing Review page, not as
                 # a new kind of Event -- a crowd/dwell condition isn't "one tracked
-                # object," so it doesn't fit Events' per-object model the way an
-                # open-vocab match (a real, single detected thing) does. Built on
-                # objects_for_review (already includes any openvocab synthetic
-                # entries) so a rule can, in principle, also fire on a synthetic
-                # open-vocab-detected object's dwell time.
-                rule_triggers = self.rules_engine.process(camera, frame_time, objects_for_review)
+                # object," so it doesn't fit Events' per-object model.
+                rule_triggers = self.rules_engine.process(camera, frame_time, tracked_objects)
                 objects_for_review_with_rules = (
-                    {**objects_for_review, **rule_triggers} if rule_triggers else objects_for_review
+                    {**tracked_objects, **rule_triggers} if rule_triggers else tracked_objects
                 )
                 self.review_maintainer.process(camera, frame_time, objects_for_review_with_rules, frame_jpeg=frame_jpeg)
             except Exception:
                 logger.exception("%s: error consuming tracked-object result", camera_name)
-
-            if self.openvocab_dispatcher is not None:
-                try:
-                    self.openvocab_dispatcher.process_frame(
-                        self.config, camera, frame_name, frame_time, tracked_objects, motion_boxes=motion_boxes,
-                    )
-                except Exception:
-                    logger.exception("%s: error dispatching to openvocab", camera_name)
-
-                previous_ids = previous_ids_by_camera.get(camera_name, set())
-                current_ids = set(tracked_objects.keys())
-                for ended_id in previous_ids - current_ids:
-                    self.openvocab_dispatcher.forget_object(ended_id)
-                previous_ids_by_camera[camera_name] = current_ids
 
             # Species dispatch itself already happened synchronously inside
             # EventProcessor._on_start above (at Event-creation time) -- this is just
@@ -597,12 +500,6 @@ class MirageApp:
             if detector.is_alive():
                 detector.terminate()
                 detector.join(timeout=5)
-
-        if self.openvocab_process is not None:
-            self.openvocab_process.join(timeout=15)
-            if self.openvocab_process.is_alive():
-                self.openvocab_process.terminate()
-                self.openvocab_process.join(timeout=5)
 
         if self.species_process is not None:
             self.species_process.join(timeout=15)

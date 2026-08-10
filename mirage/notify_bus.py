@@ -46,8 +46,7 @@ def _log_path(cache_dir: str) -> Path:
 class NotifyLogWriter:
     """Lives in the main process's result-consumer thread (see mirage.app.MirageApp) --
     the only thing that ever appends to the notify log file, draining NotifyEvents put
-    onto MirageApp.notify_queue by EventProcessor/ReviewSegmentMaintainer/
-    OpenVocabDispatcher.
+    onto MirageApp.notify_queue by EventProcessor/ReviewSegmentMaintainer.
     """
 
     def __init__(self, cache_dir: str) -> None:

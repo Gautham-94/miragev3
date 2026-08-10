@@ -1,18 +1,14 @@
 """RulesEngine: camera-level derived-condition alerts -- crowd count and dwell-time/
 loitering (TODO_FIX_LIST.md item 7.4's "rules engine" idea, scoped down to these two
 rule types after discussion with the user; a third -- weapon detection -- was
-deliberately deferred, since it has no existing detection capability to build on and
-needs a real accuracy check against the open-vocab OWLv2 path before being shipped as
-an alert type).
+deliberately deferred, since it has no existing detection capability to build on).
 
 Distinct from mirage.events.review.classify_severity, which classifies alert/detection
 severity PER OBJECT LABEL: a rule condition is computed from the CURRENT SET of tracked
 objects (a count, a duration), not any single object's label -- there is no "the label
-that means crowd." Lives alongside mirage.openvocab.dispatcher.OpenVocabDispatcher as a
-second producer of SYNTHETIC TrackedObjectState entries fed into the same
+that means crowd." Produces SYNTHETIC TrackedObjectState entries fed into the same
 dict[str, TrackedObjectState] shape EventProcessor/ReviewSegmentMaintainer already
-consume from the closed-vocab pipeline (see OpenVocabDispatcher's own module docstring
-for the pattern this follows) -- called once per camera per frame from
+consume from the closed-vocab pipeline -- called once per camera per frame from
 mirage.app._result_consumer_loop, merged into that frame's tracked_objects BEFORE
 EventProcessor/ReviewSegmentMaintainer run, so a rule firing drives a real
 ReviewSegment (severity="rule", see mirage.events.review.Severity) through the exact
@@ -75,7 +71,7 @@ _DWELL_START_GRACE_SECONDS = 15.0
 
 class RulesEngine:
     """One instance per MirageApp (not per camera) -- all per-camera state is keyed by
-    camera name internally, same pattern OpenVocabDispatcher already uses.
+    camera name internally.
     """
 
     def __init__(self) -> None:
@@ -92,11 +88,9 @@ class RulesEngine:
     def process(
         self, camera: CameraConfig, frame_time: float, tracked_objects: dict[str, TrackedObjectState],
     ) -> dict[str, TrackedObjectState]:
-        """Returns synthetic rule-trigger entries for THIS frame only -- unlike
-        OpenVocabDispatcher.synthetic_tracked_objects (which has its own multi-frame
-        TTL-based liveness state, since OWLv2 matches arrive asynchronously seconds
-        apart), a rule condition is fully re-evaluated fresh every single frame from
-        real, already-current tracked_objects: if the condition no longer holds this
+        """Returns synthetic rule-trigger entries for THIS frame only -- a rule
+        condition is fully re-evaluated fresh every single frame from real,
+        already-current tracked_objects: if the condition no longer holds this
         frame, the synthetic entry simply isn't in the returned dict, and
         ReviewSegmentMaintainer's existing cutoff-timer logic (same as any other
         object disappearing) closes out the segment after review.cutoff_seconds of no
@@ -133,8 +127,7 @@ class RulesEngine:
             # No single box represents "the whole crowd" -- the full frame is the
             # most honest placeholder; nothing currently renders a box for a
             # rule-severity ReviewSegment's thumbnail (review boxes are disabled
-            # entirely per an earlier user request, same as every other synthetic
-            # track -- see OpenVocabDispatcher.SyntheticTrack's own note on this).
+            # entirely per an earlier user request).
             box=(0.0, 0.0, float(camera.detect.width), float(camera.detect.height)),
             score=1.0,
             stationary=StationaryClassifier(threshold_frames=10**9),

@@ -43,16 +43,10 @@ export class ConfigPage implements OnInit {
   protected readonly restarting = signal(false);
   protected readonly restartRequested = signal(false);
 
-  protected readonly openvocabEnabled = signal(true);
-  protected readonly openvocabLoading = signal(true);
-  protected readonly openvocabToggling = signal(false);
-  protected readonly openvocabError = signal<string | null>(null);
-
   constructor(private readonly api: ApiService) {}
 
   ngOnInit(): void {
     this.load();
-    this.loadOpenvocabSettings();
     this.api.getSystemCapabilities().subscribe({
       next: (caps) => this.capabilities.set(caps),
       // Non-fatal: the worker-count controls still work without capability guidance,
@@ -71,36 +65,6 @@ export class ConfigPage implements OnInit {
       error: (err) => {
         this.loadError.set(err?.error?.detail ?? 'Could not load detectors.');
         this.loading.set(false);
-      },
-    });
-  }
-
-  private loadOpenvocabSettings(): void {
-    this.openvocabLoading.set(true);
-    this.api.getOpenvocabSettings().subscribe({
-      next: (settings) => {
-        this.openvocabEnabled.set(settings.enabled);
-        this.openvocabLoading.set(false);
-      },
-      error: (err) => {
-        this.openvocabError.set(err?.error?.detail ?? 'Could not load open-vocabulary settings.');
-        this.openvocabLoading.set(false);
-      },
-    });
-  }
-
-  protected toggleOpenvocab(): void {
-    this.openvocabToggling.set(true);
-    this.openvocabError.set(null);
-    const nextEnabled = !this.openvocabEnabled();
-    this.api.setOpenvocabEnabled(nextEnabled).subscribe({
-      next: (settings) => {
-        this.openvocabToggling.set(false);
-        this.openvocabEnabled.set(settings.enabled);
-      },
-      error: (err) => {
-        this.openvocabToggling.set(false);
-        this.openvocabError.set(err?.error?.detail ?? `Could not ${nextEnabled ? 'enable' : 'disable'} open-vocabulary search.`);
       },
     });
   }

@@ -1,6 +1,6 @@
 """SSE endpoint for live push updates -- lets the frontend learn about new
-Event/ReviewSegment/QueryMatch rows as soon as the pipeline process creates them,
-instead of relying purely on polling (see the Events/Review/Queries pages' `visibleInterval`
+Event/ReviewSegment rows as soon as the pipeline process creates them, instead of
+relying purely on polling (see the Events/Review pages' `visibleInterval`
 reconciliation polls, which now just self-heal any gap from a dropped connection).
 
 Bridges the pipeline/API process boundary via mirage.notify_bus (same file-based IPC
@@ -27,8 +27,8 @@ import logging
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
-from mirage.api.schemas import EventOut, QueryMatchOut, ReviewSegmentOut
-from mirage.db.models import Event, QueryMatch, ReviewSegment
+from mirage.api.schemas import EventOut, ReviewSegmentOut
+from mirage.db.models import Event, ReviewSegment
 from mirage.notify_bus import read_notify_events_since
 
 logger = logging.getLogger(__name__)
@@ -42,7 +42,6 @@ CLIENT_QUEUE_MAXSIZE = 200
 _TABLE_LOOKUP = {
     "event": (Event, EventOut),
     "review_segment": (ReviewSegment, ReviewSegmentOut),
-    "query_match": (QueryMatch, QueryMatchOut),
 }
 
 # Every currently-connected SSE client's own queue -- fan-out target for

@@ -110,17 +110,7 @@ class EventProcessor:
         frame_time: float,
         tracked_objects: dict[str, TrackedObjectState],
         frame_jpeg: bytes | None = None,
-        object_frame_jpegs: dict[str, bytes] | None = None,
     ) -> None:
-        """`object_frame_jpegs` (obj_id -> jpeg bytes), if given, OVERRIDES `frame_jpeg`
-        for specific object ids -- currently only ever populated for direct-frame-mode
-        open-vocab synthetic tracks (mirage.openvocab.dispatcher.
-        OpenVocabDispatcher.synthetic_frame_jpegs), since those objects were detected
-        in a COMPLETELY DIFFERENT frame than whatever `frame_jpeg` this call's
-        closed-vocab tracker captured (TODO_FIX_LIST.md item 9/11). An object id with
-        no entry here falls back to `frame_jpeg` (the pre-existing closed-vocab
-        behavior), same as before this param existed.
-        """
         previous_ids = self._previous_ids_by_camera.get(camera.name, set())
         current_ids = set(tracked_objects.keys())
 
@@ -128,21 +118,8 @@ class EventProcessor:
         updated_ids = current_ids & previous_ids
         removed_ids = previous_ids - current_ids
 
-        object_frame_jpegs = object_frame_jpegs or {}
         for obj_id in new_ids:
-            if obj_id in object_frame_jpegs:
-                # This object's frame came from its OWN separate capture (a
-                # direct-frame-mode OWLv2 call, not the shared closed-vocab
-                # `frame_jpeg`) -- passing the full `tracked_objects` dict here would
-                # box every OTHER confirmed object too, but those boxes are from a
-                # DIFFERENT frame entirely and would land on the wrong pixels. Only
-                # this one object's own box belongs on its own frame.
-                self._on_start(
-                    camera, obj_id, tracked_objects[obj_id], frame_time,
-                    object_frame_jpegs[obj_id], {obj_id: tracked_objects[obj_id]},
-                )
-            else:
-                self._on_start(camera, obj_id, tracked_objects[obj_id], frame_time, frame_jpeg, tracked_objects)
+            self._on_start(camera, obj_id, tracked_objects[obj_id], frame_time, frame_jpeg, tracked_objects)
 
         for obj_id in updated_ids:
             self._on_update(camera, obj_id, tracked_objects[obj_id], frame_time)

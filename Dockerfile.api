@@ -1,18 +1,13 @@
 # mirage read API image: python -m mirage.api (FastAPI/uvicorn). Reads the SAME
 # SQLite DB (config/mirage.db) and media/cache files the pipeline container writes --
 # shares a Docker volume with it (see docker-compose.yml), never talks to it directly
-# over the network. Confirmed transitively imports cv2/onnxruntime (schema/thumbnail
-# drawing code) but NOT torch/transformers, unlike the pipeline image -- still uses the
-# same requirements.txt rather than a separate slimmed-down one, since this repo has no
-# existing split and inventing one now risks a real import error from missing a
-# transitive dependency that isn't obvious from a one-off import trace.
+# over the network.
 FROM python:3.12-slim
 
 WORKDIR /app
 
-# See Dockerfile.pipeline for why --extra-index-url points at the CPU-only torch wheels.
 COPY requirements.txt ./
-RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY pyproject.toml ./
 COPY mirage ./mirage
