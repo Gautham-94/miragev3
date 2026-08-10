@@ -13,11 +13,39 @@ services:
     # for more than one camera at real resolution/fps. Adjust upward if you add many
     # cameras or run at high resolution -- see calculate_shm_ring_depth.
     shm_size: "2gb"
+    # NVIDIA GPU passthrough (Dockerfile.pipeline is now a CUDA image). Requires: the
+    # NVIDIA driver installed on the Windows host, and GPU support enabled in Docker
+    # Desktop (Settings > Resources > WSL Integration; Docker Desktop's WSL2 backend
+    # exposes the GPU to containers automatically once that's on -- no separate
+    # nvidia-container-toolkit install needed on Windows, unlike native Linux Docker).
+    # If you don't have a GPU or want to run CPU-only, delete this whole `deploy:` block
+    # -- the image still works without a GPU, just slower (see Dockerfile.pipeline).
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     volumes:
       - config:/data/config
       - media:/data/media
       - cache:/data/cache
       - go2rtc-bin:/data/go2rtc-bin
+      # Host folder bind mount (not a named volume) so you can drop/swap .onnx and
+      # labelmap files directly from Windows Explorer -- point model_path/labelmap_path
+      # at e.g. /data/models/best.onnx via the Manage Detectors page. Change the host
+      # side (./models) to wherever you keep model files if not alongside this compose
+      # file.
+      - ./models:/data/models
+      # SpeciesNet (optional; config.species_classifier.enabled defaults to False)
+      # downloads its model weights via kagglehub on first use, into the container
+      # user's default cache dir (~/.cache/kagglehub) -- without this volume that cache
+      # is lost (and re-downloaded from Kaggle) every time the container is recreated.
+      # Requires outbound internet access from the container on first classification;
+      # if the underlying Kaggle dataset ever requires auth, set KAGGLE_USERNAME/
+      # KAGGLE_KEY as environment vars on this service (see kagglehub's own docs).
+      - speciesnet-cache:/root/.cache/kagglehub
     ports:
       - "1984:1984" # go2rtc API/HTTP (snapshot fallback, direct debugging)
       - "8555:8555" # go2rtc WebRTC
@@ -31,6 +59,7 @@ services:
       - config:/data/config
       - media:/data/media
       - cache:/data/cache
+      - ./models:/data/models
     depends_on:
       - pipeline
     restart: unless-stopped
@@ -50,3 +79,4 @@ volumes:
   media:
   cache:
   go2rtc-bin:
+  speciesnet-cache:

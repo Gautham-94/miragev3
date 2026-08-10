@@ -117,49 +117,6 @@
 
   <section class="section">
     <div class="section-header">
-      <h2>Open-vocabulary search</h2>
-      <p>
-        Controls the OWLv2 worker process that powers free-text <a routerLink="/queries">Queries</a> (e.g. "person
-        carrying a red backpack"). It's a large model (~600&nbsp;MB) kept resident in memory whenever this is on --
-        disable it to free that memory without deleting or disabling your saved queries; they'll simply stop being
-        checked until this is turned back on.
-      </p>
-    </div>
-
-    @if (openvocabLoading()) {
-      <div class="empty-state">
-        <span class="eyebrow">loading</span>
-      </div>
-    } @else {
-      <div class="detector-list">
-        <div class="detector-row" [class.disabled]="!openvocabEnabled()">
-          <app-icon name="search" [size]="20" />
-          <div class="detector-info">
-            <span class="detector-name">OWLv2 open-vocabulary search</span>
-            <span class="detector-meta mono">google/owlv2-base-patch16-ensemble · ~600&nbsp;MB resident</span>
-          </div>
-
-          <label class="switch" [class.saving]="openvocabToggling()">
-            <input
-              type="checkbox"
-              [checked]="openvocabEnabled()"
-              [disabled]="openvocabToggling()"
-              (change)="toggleOpenvocab()"
-            />
-            <span class="switch-track"><span class="switch-thumb"></span></span>
-            <span class="switch-label">{{ openvocabEnabled() ? 'Enabled' : 'Disabled' }}</span>
-          </label>
-        </div>
-      </div>
-    }
-
-    @if (openvocabError()) {
-      <div class="inline-error">{{ openvocabError() }}</div>
-    }
-  </section>
-
-  <section class="section">
-    <div class="section-header">
       <h2>Pipeline</h2>
       <p>Restart the detection/recording pipeline to pick up any config changes (detector toggles, camera edits, ...).</p>
     </div>

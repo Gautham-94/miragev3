@@ -1,0 +1,30 @@
+# GPU variant of requirements.txt for Dockerfile.pipeline's CUDA build only -- NOT used
+# by Dockerfile.api (that image never runs the YOLOv8n inference path that benefits
+# from a GPU, only cv2/onnxruntime for thumbnail drawing, so it stays on the plain CPU
+# requirements.txt to keep its image small).
+#
+# Same pins as requirements.txt except onnxruntime -> onnxruntime-gpu
+# (CUDAExecutionProvider; see mirage/detection/execution_providers.py). The two
+# packages both import as `onnxruntime` and conflict if both installed -- pick exactly
+# one per image.
+numpy==1.26.*
+opencv-python-headless==4.11.0.*
+scipy==1.16.*
+norfair==2.3.*
+pyzmq==26.2.*
+peewee==3.17.*
+peewee_migrate==1.14.*
+pydantic==2.10.*
+psutil==7.1.*
+setproctitle==1.3.*
+onnxruntime-gpu==1.22.*
+pyyaml==6.0.*
+
+fastapi==0.115.*
+uvicorn[standard]==0.32.*
+python-multipart==0.0.*
+websockets==13.*
+httpx==0.27.*
+onvif-zeep-async==4.2.*
+
+pytest==8.3.*

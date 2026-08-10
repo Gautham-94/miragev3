@@ -1,11 +1,9 @@
 """SpeciesDispatcher: lives in the main process's result-consumer loop
 (mirage.app.MirageApp._result_consumer_loop), alongside EventProcessor and
-ReviewSegmentMaintainer -- mirrors mirage.openvocab.dispatcher.OpenVocabDispatcher's
-role as the main-process side of a request/result mp.Queue pair, but considerably
-simpler: species classification fires exactly ONCE per Event's lifetime (at Event
-creation, from EventProcessor._on_start), never per-frame, so there's no synthetic-track
-bridge and no perceptual-hash dedup gate to build (OpenVocabDispatcher needs both
-because it re-checks the SAME tracked object across many frames as it changes).
+ReviewSegmentMaintainer -- the main-process side of a request/result mp.Queue pair.
+Species classification fires exactly ONCE per Event's lifetime (at Event creation, from
+EventProcessor._on_start), never per-frame, so there's no synthetic-track bridge or
+perceptual-hash dedup gate to build.
 """
 
 from __future__ import annotations

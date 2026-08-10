@@ -37,10 +37,6 @@ export const routes: Routes = [
         loadComponent: () => import('./pages/manage-detectors/manage-detectors-page').then((m) => m.ManageDetectorsPage),
       },
       {
-        path: 'queries',
-        loadComponent: () => import('./pages/queries/queries-page').then((m) => m.QueriesPage),
-      },
-      {
         path: 'config',
         loadComponent: () => import('./pages/config/config-page').then((m) => m.ConfigPage),
       },

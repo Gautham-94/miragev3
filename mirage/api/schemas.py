@@ -75,32 +75,6 @@ class EventOut(BaseModel):
         )
 
 
-class QueryMatchOut(BaseModel):
-    id: str
-    query_id: str
-    query_text: str
-    camera: str
-    object_id: str
-    matched_at: float
-    score: float
-    box: list[float]
-    has_thumb: bool
-
-    @classmethod
-    def from_model(cls, match) -> "QueryMatchOut":
-        return cls(
-            id=match.id,
-            query_id=match.query_id,
-            query_text=match.query_text,
-            camera=match.camera,
-            object_id=match.object_id,
-            matched_at=_epoch(match.matched_at),
-            score=match.score,
-            box=match.box or [],
-            has_thumb=bool(match.thumb_path),
-        )
-
-
 class RecordingOut(BaseModel):
     id: str
     camera: str

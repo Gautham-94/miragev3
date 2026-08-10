@@ -21,7 +21,6 @@ explicitly via `restart_required: true` rather than silently implying otherwise.
 from __future__ import annotations
 
 import os
-import uuid
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
@@ -39,7 +38,6 @@ from mirage.config.schema import (
     MirageConfig,
     ObjectFilterConfig,
     ObjectsConfig,
-    OpenVocabQuery,
     PixelFormat,
     RecordConfig,
     RetainConfig,
@@ -48,10 +46,8 @@ from mirage.config.schema import (
     RtspTransport,
     RulesConfig,
     TensorLayout,
-    split_track_objects,
 )
 from mirage.detection.execution_providers import available_execution_providers
-from mirage.detection.labelmap import load_labels
 from mirage.detection.registry import available_backends
 
 router = APIRouter(prefix="/api/config", tags=["config"])
@@ -104,11 +100,6 @@ class CameraWriteRequest(BaseModel):
     # some cameras' RTSP-over-TCP implementations are unreliable -- UDP is the escape
     # hatch, exposed here so the wizard can offer it as a per-camera choice.
     rtsp_transport: RtspTransport = RtspTransport.tcp
-    # See CameraConfig.openvocab_direct_frame's docstring -- False (default) keeps
-    # open-vocab queries scoped to crops of objects the closed-vocab detector already
-    # confirmed; True checks the whole motion-triggered frame directly, for queries about
-    # things that detector was never trained to recognize as an object at all.
-    openvocab_direct_frame: bool = False
     # See RulesConfig's own docstring -- both None/0 (default) disable their respective
     # rule. crowd_threshold: alert once this many confirmed "person" tracks are present
     # at once. dwell_seconds: alert once ANY tracked object has been continuously
@@ -131,12 +122,6 @@ class ConfigMutationResponse(BaseModel):
     ok: bool = True
     restart_required: bool = True
     camera: CameraOut
-    # Which of this camera's objects.track words were routed to the open-vocabulary
-    # path (see split_track_objects/_sync_track_object_queries) rather than being a
-    # real closed-vocab label the routed detector recognizes -- lets the Add/Edit
-    # Camera form show an inline "checking X via open-vocabulary search instead" note
-    # without the frontend needing its own copy of the detector's labelmap.
-    open_vocab_terms: list[str] = []
 
 
 class CameraConfigOut(BaseModel):
@@ -163,7 +148,6 @@ class CameraConfigOut(BaseModel):
     segment_seconds: int
     alert_labels: list[str]
     detection_labels: list[str]
-    openvocab_direct_frame: bool
     crowd_threshold: int | None
     dwell_seconds: int | None
     min_score: float
@@ -206,7 +190,6 @@ def _camera_config_out(cam: CameraConfig) -> CameraConfigOut:
         segment_seconds=cam.record.segment_seconds,
         alert_labels=cam.review.alerts.labels,
         detection_labels=cam.review.detections.labels,
-        openvocab_direct_frame=cam.openvocab_direct_frame,
         crowd_threshold=cam.rules.crowd_threshold,
         dwell_seconds=cam.rules.dwell_seconds,
         # objects.filters is keyed per-label (ObjectsConfig.filter_for), not a single
@@ -218,104 +201,6 @@ def _camera_config_out(cam: CameraConfig) -> CameraConfigOut:
         min_score=cam.objects.filter_for(cam.objects.track[0]).min_score if cam.objects.track else ObjectFilterConfig().min_score,
         threshold=cam.objects.filter_for(cam.objects.track[0]).threshold if cam.objects.track else ObjectFilterConfig().threshold,
     )
-
-
-def _resolve_open_vocab_terms(camera: CameraConfig, config: MirageConfig) -> list[str]:
-    """Which of this camera's objects.track words aren't in its routed detector's
-    labelmap -- see split_track_objects()'s docstring. Best-effort: if the detector or
-    its labelmap file is missing/unreadable (shouldn't happen for a validated config,
-    but this runs at write-time before that's guaranteed), treat every track word as
-    closed-vocab rather than raising, so a camera write never fails because of this
-    auto-provisioning side effect.
-    """
-    detector = config.detectors.get(camera.detector)
-    if detector is None:
-        return []
-    try:
-        labels = set(load_labels(detector.model.labelmap_path).values())
-    except OSError:
-        return []
-    _closed, open_vocab = split_track_objects(camera.objects.track, labels)
-    return open_vocab
-
-
-def _sync_track_object_queries(camera: CameraConfig, config: MirageConfig) -> list[str]:
-    """Keeps config.queries' auto-provisioned (source="track_objects") entries for this
-    camera in lockstep with its current objects.track list -- called after every
-    camera create/update. This is what makes typing "animals" into Track objects
-    actually DO something (TODO_FIX_LIST.md item 4's original gap: a non-COCO track
-    word used to be a silently dead config value) without a separate trip to the
-    Queries page: it's auto-wired to an open-vocab query scoped to this camera, and
-    CameraConfig.openvocab_direct_frame is auto-enabled so that query is actually
-    checked (against the whole motion-triggered frame, since there's no closed-vocab
-    detection to crop for a word the detector doesn't know).
-
-    Existing auto-provisioned queries for this camera that no longer match a current
-    open-vocab track word are removed (e.g. "animals" deleted from Track objects should
-    stop being checked, not linger as an orphaned query) -- manual (source="manual")
-    queries are never touched here, regardless of camera scope.
-
-    Returns the resolved open-vocab terms so the caller can surface them on
-    ConfigMutationResponse.open_vocab_terms (the Add/Edit Camera form's inline info
-    note) without recomputing.
-    """
-    open_vocab_terms = _resolve_open_vocab_terms(camera, config)
-
-    other_queries = [
-        q for q in config.queries if not (q.source == "track_objects" and q.cameras == [camera.name])
-    ]
-    existing_auto = {
-        q.text: q for q in config.queries if q.source == "track_objects" and q.cameras == [camera.name]
-    }
-
-    synced = list(other_queries)
-    for term in open_vocab_terms:
-        existing = existing_auto.get(term)
-        synced.append(
-            OpenVocabQuery(
-                id=existing.id if existing else uuid.uuid4().hex,
-                text=term,
-                cameras=[camera.name],
-                enabled=True,
-                source="track_objects",
-            )
-        )
-    config.queries = synced
-
-    # Auto-enable direct-frame mode the moment this camera has any open-vocab track
-    # word -- otherwise the auto-provisioned query would silently sit unused (direct-
-    # frame mode is required for it to ever be checked, since there's no confirmed
-    # closed-vocab object to crop for a word outside that detector's label map). Leaves
-    # the flag alone (doesn't turn it back off) if a camera had it manually enabled for
-    # unrelated manual queries -- only ever turns it ON as a side effect here.
-    if open_vocab_terms and not camera.openvocab_direct_frame:
-        camera.openvocab_direct_frame = True
-
-    # Auto-add each open-vocab track word to this camera's alert labels, same as a
-    # native COCO track word (e.g. "person") already implicitly drives review severity
-    # via ReviewSegmentMaintainer.classify_severity -- otherwise a real OWLv2 match for
-    # "animals" would persist as a QueryMatch row but never surface as a review/alert,
-    # which defeats the entire point of this auto-provisioning (see
-    # mirage/openvocab/dispatcher.py's synthetic-tracked-object bridge, which is what
-    # makes a match flow through the SAME alert path a real tracked object does). Only
-    # ever adds -- never removes a label the user configured by hand, since alert_labels
-    # can also hold entries unrelated to track_objects entirely.
-    for term in open_vocab_terms:
-        if term not in camera.review.alerts.labels:
-            camera.review.alerts.labels.append(term)
-
-    return open_vocab_terms
-
-
-def _remove_track_object_queries_for_camera(camera_name: str, config: MirageConfig) -> None:
-    """Cleanup counterpart to _sync_track_object_queries, called on camera delete --
-    an auto-provisioned query scoped to a camera that no longer exists would otherwise
-    linger forever (MirageConfig's own _validate_query_camera_refs validator would
-    actually reject it on next load, since it references an unknown camera).
-    """
-    config.queries = [
-        q for q in config.queries if not (q.source == "track_objects" and q.cameras == [camera_name])
-    ]
 
 
 def _build_camera_config(req: CameraWriteRequest) -> CameraConfig:
@@ -348,7 +233,6 @@ def _build_camera_config(req: CameraWriteRequest) -> CameraConfig:
         review=ReviewConfig(**review_kwargs) if review_kwargs else ReviewConfig(),
         rules=RulesConfig(crowd_threshold=req.crowd_threshold, dwell_seconds=req.dwell_seconds),
         detector=req.detector,
-        openvocab_direct_frame=req.openvocab_direct_frame,
     )
 
 
@@ -598,10 +482,9 @@ def create_camera(req: CameraWriteRequest, request: Request) -> ConfigMutationRe
         raise HTTPException(status_code=422, detail=str(e)) from e
 
     config.cameras[req.name] = camera
-    open_vocab_terms = _sync_track_object_queries(camera, config)
     config.save_to_db()
 
-    return ConfigMutationResponse(camera=_camera_out(camera), open_vocab_terms=open_vocab_terms)
+    return ConfigMutationResponse(camera=_camera_out(camera))
 
 
 @router.put("/cameras/{name}", response_model=ConfigMutationResponse)
@@ -625,12 +508,10 @@ def update_camera(name: str, req: CameraWriteRequest, request: Request) -> Confi
 
     if req.name != name:
         del config.cameras[name]
-        _remove_track_object_queries_for_camera(name, config)
     config.cameras[req.name] = camera
-    open_vocab_terms = _sync_track_object_queries(camera, config)
     config.save_to_db()
 
-    return ConfigMutationResponse(camera=_camera_out(camera), open_vocab_terms=open_vocab_terms)
+    return ConfigMutationResponse(camera=_camera_out(camera))
 
 
 @router.delete("/cameras/{name}", status_code=204, response_model=None)
@@ -641,134 +522,4 @@ def delete_camera(name: str, request: Request) -> None:
         raise HTTPException(status_code=404, detail=f"unknown camera {name!r}")
 
     del config.cameras[name]
-    _remove_track_object_queries_for_camera(name, config)
     config.save_to_db()
-
-
-class QueryOut(BaseModel):
-    id: str
-    text: str
-    cameras: list[str]
-    enabled: bool
-    source: str
-
-
-class QueryWriteRequest(BaseModel):
-    """See mirage.config.schema.OpenVocabQuery / TODO_FIX_LIST.md items 4/6 -- a saved
-    free-text description checked against confirmed tracked objects via OWLv2, e.g.
-    "person carrying a red backpack". `cameras` empty/unset means "applies to every
-    camera"; non-empty scopes it to just those camera names.
-    """
-
-    text: str = Field(min_length=1)
-    cameras: list[str] = Field(default_factory=list)
-    enabled: bool = True
-
-
-def _query_out(query: OpenVocabQuery) -> QueryOut:
-    return QueryOut(id=query.id, text=query.text, cameras=query.cameras, enabled=query.enabled, source=query.source)
-
-
-@router.get("/queries", response_model=list[QueryOut])
-def list_queries(request: Request) -> list[QueryOut]:
-    config = request.app.state.get_config()
-    return [_query_out(q) for q in config.queries]
-
-
-@router.post("/queries", response_model=QueryOut, status_code=201)
-def create_query(req: QueryWriteRequest, request: Request) -> QueryOut:
-    config = request.app.state.get_config()
-
-    unknown = [c for c in req.cameras if c not in config.cameras]
-    if unknown:
-        raise HTTPException(status_code=422, detail=f"unknown camera(s) {unknown}; known cameras: {sorted(config.cameras)}")
-
-    try:
-        query = OpenVocabQuery(id=uuid.uuid4().hex, text=req.text, cameras=req.cameras, enabled=req.enabled)
-    except ValidationError as e:
-        raise HTTPException(status_code=422, detail=str(e)) from e
-
-    config.queries.append(query)
-    config.save_to_db()
-
-    return _query_out(query)
-
-
-@router.put("/queries/{query_id}", response_model=QueryOut)
-def update_query(query_id: str, req: QueryWriteRequest, request: Request) -> QueryOut:
-    config = request.app.state.get_config()
-
-    existing = next((q for q in config.queries if q.id == query_id), None)
-    if existing is None:
-        raise HTTPException(status_code=404, detail=f"unknown query {query_id!r}")
-    if existing.source == "track_objects":
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"query {query_id!r} was auto-created from camera "
-                f"{existing.cameras[0] if existing.cameras else '?'!r}'s Track objects field; "
-                "edit or remove the word there instead of editing this query directly"
-            ),
-        )
-
-    unknown = [c for c in req.cameras if c not in config.cameras]
-    if unknown:
-        raise HTTPException(status_code=422, detail=f"unknown camera(s) {unknown}; known cameras: {sorted(config.cameras)}")
-
-    try:
-        updated = OpenVocabQuery(id=query_id, text=req.text, cameras=req.cameras, enabled=req.enabled)
-    except ValidationError as e:
-        raise HTTPException(status_code=422, detail=str(e)) from e
-
-    config.queries = [updated if q.id == query_id else q for q in config.queries]
-    config.save_to_db()
-
-    return _query_out(updated)
-
-
-@router.delete("/queries/{query_id}", status_code=204, response_model=None)
-def delete_query(query_id: str, request: Request) -> None:
-    config = request.app.state.get_config()
-
-    existing = next((q for q in config.queries if q.id == query_id), None)
-    if existing is None:
-        raise HTTPException(status_code=404, detail=f"unknown query {query_id!r}")
-    if existing.source == "track_objects":
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"query {query_id!r} was auto-created from camera "
-                f"{existing.cameras[0] if existing.cameras else '?'!r}'s Track objects field; "
-                "remove the word there instead of deleting this query directly"
-            ),
-        )
-
-    config.queries = [q for q in config.queries if q.id != query_id]
-    config.save_to_db()
-
-
-class OpenVocabSettingsOut(BaseModel):
-    enabled: bool
-
-
-class OpenVocabEnabledRequest(BaseModel):
-    enabled: bool
-
-
-@router.get("/openvocab", response_model=OpenVocabSettingsOut)
-def get_openvocab_settings(request: Request) -> OpenVocabSettingsOut:
-    config = request.app.state.get_config()
-    return OpenVocabSettingsOut(enabled=config.openvocab_enabled)
-
-
-@router.patch("/openvocab/enabled", response_model=OpenVocabSettingsOut)
-def set_openvocab_enabled(req: OpenVocabEnabledRequest, request: Request) -> OpenVocabSettingsOut:
-    """Master switch for the OWLv2 open-vocabulary worker (mirage/app.py's
-    MirageApp._start_openvocab) -- lets queries stay saved/enabled while still keeping
-    the ~600MB OWLv2 model out of memory, rather than requiring every query to be
-    individually disabled/deleted. See MirageConfig.openvocab_enabled's own docstring.
-    """
-    config = request.app.state.get_config()
-    config.openvocab_enabled = req.enabled
-    config.save_to_db()
-    return OpenVocabSettingsOut(enabled=config.openvocab_enabled)

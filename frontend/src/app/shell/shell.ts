@@ -34,7 +34,6 @@ export class Shell implements OnInit {
     { path: '/recordings', label: 'Recordings', icon: 'film' },
     { path: '/cameras', label: 'Cameras', icon: 'settings' },
     { path: '/detectors', label: 'Detectors', icon: 'cpu' },
-    { path: '/queries', label: 'Queries', icon: 'search' },
     { path: '/config', label: 'Config', icon: 'settings' },
     { path: '/logs', label: 'Logs', icon: 'list' },
   ];

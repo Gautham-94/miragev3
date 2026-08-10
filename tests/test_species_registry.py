@@ -15,9 +15,7 @@ from mirage.species.registry import available_backends, create_classifier
 # The real speciesnet package deliberately lives in a SEPARATE venv from mirage's own
 # (see mirage/species/plugins/speciesnet.py's module docstring for the numpy/opencv
 # conflict this avoids) -- tests that actually launch the worker subprocess and run
-# real inference only run if that sibling venv has been set up locally, same
-# conditional-skip pattern test_openvocab_process_e2e.py already uses for its own
-# real-model dependency.
+# real inference only run if that sibling venv has been set up locally.
 _VENV_PYTHON = Path(__file__).resolve().parent.parent / ".venv-speciesnet" / "bin" / "python"
 requires_speciesnet_venv = pytest.mark.skipif(
     not _VENV_PYTHON.exists(),

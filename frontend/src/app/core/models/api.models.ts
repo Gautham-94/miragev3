@@ -153,7 +153,6 @@ export interface CameraWriteRequest {
   detection_labels?: string[];
   enabled?: boolean;
   rtsp_transport?: RtspTransport;
-  openvocab_direct_frame?: boolean;
   // See mirage.config.schema.RulesConfig's docstring -- both undefined/null (default)
   // disable their respective rule. crowd_threshold: alert once this many confirmed
   // "person" tracks are present at once. dwell_seconds: alert once ANY tracked object
@@ -186,7 +185,6 @@ export interface CameraConfigDetail {
   segment_seconds: number;
   alert_labels: string[];
   detection_labels: string[];
-  openvocab_direct_frame: boolean;
   crowd_threshold: number | null;
   dwell_seconds: number | null;
   min_score: number;
@@ -197,10 +195,6 @@ export interface ConfigMutationResponse {
   ok: boolean;
   restart_required: boolean;
   camera: Camera;
-  // Which of the saved camera's Track objects words aren't in its detector's
-  // vocabulary and are therefore being checked via open-vocabulary search instead
-  // (see mirage/api/routers/config.py's _sync_track_object_queries).
-  open_vocab_terms: string[];
 }
 
 export interface OnvifDevice {
@@ -215,22 +209,6 @@ export interface OnvifResolveResult {
   device_name: string | null;
 }
 
-export type QuerySource = 'manual' | 'track_objects';
-
-export interface Query {
-  id: string;
-  text: string;
-  cameras: string[];
-  enabled: boolean;
-  source: QuerySource;
-}
-
-export interface QueryWriteRequest {
-  text: string;
-  cameras?: string[];
-  enabled?: boolean;
-}
-
 export type LogCategory = 'motion' | 'detect' | 'species' | 'system';
 
 export interface LogEntry {
@@ -243,16 +221,4 @@ export interface LogEntry {
 export interface SystemCapabilities {
   cpu_count: number;
   total_memory_mb: number;
-}
-
-export interface QueryMatch {
-  id: string;
-  query_id: string;
-  query_text: string;
-  camera: string;
-  object_id: string;
-  matched_at: number;
-  score: number;
-  box: number[];
-  has_thumb: boolean;
 }

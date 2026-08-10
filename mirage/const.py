@@ -32,7 +32,6 @@ RECORD_DIR = _env_path("MIRAGE_RECORD_DIR", Path(BASE_DIR) / "recordings")
 CLIPS_DIR = _env_path("MIRAGE_CLIPS_DIR", Path(BASE_DIR) / "clips")
 REVIEW_THUMB_DIR = str(Path(CLIPS_DIR) / "review")
 EVENT_SNAPSHOT_DIR = str(Path(CLIPS_DIR) / "events")
-QUERY_MATCH_THUMB_DIR = str(Path(CLIPS_DIR) / "query_matches")
 EXPORT_DIR = _env_path("MIRAGE_EXPORT_DIR", Path(BASE_DIR) / "exports")
 
 CONFIG_DIR = _env_path("MIRAGE_CONFIG_DIR", _PROJECT_ROOT / "config")
@@ -75,7 +74,7 @@ def ensure_dirs(*extra_dirs: str) -> None:
     """
     all_dirs = (
         CACHE_DIR, BASE_DIR, RECORD_DIR, CLIPS_DIR, REVIEW_THUMB_DIR, EVENT_SNAPSHOT_DIR,
-        QUERY_MATCH_THUMB_DIR, EXPORT_DIR, CONFIG_DIR, MODEL_CACHE_DIR,
+        EXPORT_DIR, CONFIG_DIR, MODEL_CACHE_DIR,
     ) + extra_dirs
     for d in all_dirs:
         Path(d).mkdir(parents=True, exist_ok=True)

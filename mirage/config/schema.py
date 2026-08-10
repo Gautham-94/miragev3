@@ -249,31 +249,6 @@ class SpeciesClassifierConfig(BaseModel):
     model: SpeciesModelConfig = Field(default_factory=SpeciesModelConfig)
 
 
-class OpenVocabQuery(BaseModel):
-    """A saved free-text description to match against tracked objects via the
-    open-vocabulary detector (see mirage/openvocab/), e.g. "person carrying a red
-    backpack" or "a dog off-leash" -- TODO_FIX_LIST.md items 4/6. Not tied to COCO
-    labels or any closed vocabulary; matched via OWLv2 (mirage/openvocab/process.py),
-    gated so it only runs on already-confirmed tracked objects, not every frame.
-    """
-
-    id: str
-    text: str
-    # Empty/unset -- applies to every camera. Non-empty -- only these camera names.
-    cameras: list[str] = Field(default_factory=list)
-    enabled: bool = True
-    # "manual" (default): created directly on the Queries page, for compositional
-    # descriptions a single track_objects word can't express ("person carrying a red
-    # backpack"). "track_objects": auto-provisioned because a camera's objects.track
-    # list contained a word that isn't in its detector's labelmap (e.g. "animals") --
-    # see split_track_objects() below and mirage/api/routers/config.py's
-    # _sync_track_object_queries(). Auto-provisioned queries are kept in lockstep with
-    # their owning camera's track list (recreated/deleted as that list changes) rather
-    # than being independently editable, so the Queries page shows them read-only and
-    # tags them with which camera's Track objects field they came from.
-    source: str = "manual"
-
-
 # --------------------------------------------------------------------------------------
 # Object filters -- section 6.1 / 6.2.
 # --------------------------------------------------------------------------------------
@@ -294,34 +269,12 @@ class ObjectsConfig(BaseModel):
     # detector emits (e.g. all 80 COCO classes), bypassing the `track` membership
     # check entirely -- `track` itself is left untouched/ignored while this is on, so
     # toggling it back off restores whatever was previously configured without the
-    # user needing to re-type it. Deliberately independent of `track`'s own
-    # open-vocab bridge (split_track_objects/_sync_track_object_queries in
-    # mirage/api/routers/config.py): this only ever affects closed-vocab detector
-    # labels, since there's no open-vocab equivalent of "every possible free-text
-    # query" to bypass to.
+    # user needing to re-type it.
     track_all: bool = False
     filters: dict[str, ObjectFilterConfig] = Field(default_factory=dict)
 
     def filter_for(self, label: str) -> ObjectFilterConfig:
         return self.filters.get(label, ObjectFilterConfig())
-
-
-def split_track_objects(track: list[str], known_labels: set[str]) -> tuple[list[str], list[str]]:
-    """Splits a camera's objects.track list into (closed_vocab, open_vocab) terms by
-    checking each word against `known_labels` (the routed detector's actual labelmap,
-    e.g. COCO's 80 classes) case-insensitively. A word not in the labelmap -- e.g.
-    "animals", or any species/object the closed-vocab model was never trained on -- is
-    NOT a dead config value the way it used to be (see TODO_FIX_LIST.md item 4's
-    original problem statement): it's routed to the open-vocabulary path instead, via
-    an auto-provisioned OpenVocabQuery (mirage/api/routers/config.py's
-    _sync_track_object_queries) checked directly against the whole motion-triggered
-    frame (CameraConfig.openvocab_direct_frame). Pure function, no I/O -- callers pass
-    in the labelmap already loaded from disk (mirage.detection.labelmap.load_labels).
-    """
-    known_lower = {label.lower() for label in known_labels}
-    closed_vocab = [word for word in track if word.lower() in known_lower]
-    open_vocab = [word for word in track if word.lower() not in known_lower]
-    return closed_vocab, open_vocab
 
 
 # --------------------------------------------------------------------------------------
@@ -432,15 +385,6 @@ class CameraConfig(BaseModel):
     rules: RulesConfig = Field(default_factory=RulesConfig)
     ptz: PtzConfig = Field(default_factory=PtzConfig)
     detector: str = "default"  # which DetectorInstanceConfig this camera routes detection through
-    # False (default): open-vocab queries (mirage.openvocab) only ever check crops of
-    # objects the closed-vocab detector (`detector` above) already confirmed --
-    # TODO_FIX_LIST.md item 4's original design. True: this camera's queries are checked
-    # directly against the whole motion-triggered frame instead, independent of whatever
-    # `detector`/`objects.track` would or wouldn't have detected -- for open-vocab items
-    # genuinely outside the closed-vocab detector's label map (e.g. a specific object
-    # type it was never trained on). See mirage/openvocab/dispatcher.py's two dispatch
-    # paths for how this is actually used.
-    openvocab_direct_frame: bool = False
 
     @property
     def frame_shape(self) -> tuple[int, int]:
@@ -472,17 +416,7 @@ class CameraConfig(BaseModel):
 class MirageConfig(BaseModel):
     detectors: dict[str, DetectorInstanceConfig] = Field(default_factory=dict)
     cameras: dict[str, CameraConfig] = Field(default_factory=dict)
-    queries: list[OpenVocabQuery] = Field(default_factory=list)
     species_classifier: SpeciesClassifierConfig = Field(default_factory=SpeciesClassifierConfig)
-    # Master switch for the open-vocabulary (OWLv2) worker process -- MirageApp.
-    # _start_openvocab previously spawned it purely based on "at least one enabled
-    # OpenVocabQuery exists," with no way to keep queries configured/saved but stop the
-    # ~600MB OWLv2 model from loading (and holding a process + thread alive) without
-    # disabling/deleting every query. True (default) preserves that exact prior
-    # behavior byte-for-byte; False skips the process entirely regardless of how many
-    # queries are enabled, same override relationship SpeciesClassifierConfig.enabled
-    # already has over whether any Animal/Bird events exist.
-    openvocab_enabled: bool = True
 
     @model_validator(mode="after")
     def _validate_camera_detector_refs(self) -> "MirageConfig":
@@ -491,16 +425,6 @@ class MirageConfig(BaseModel):
                 raise ValueError(
                     f"camera {cam.name!r} references unknown detector {cam.detector!r}; "
                     f"known detectors: {sorted(self.detectors)}"
-                )
-        return self
-
-    @model_validator(mode="after")
-    def _validate_query_camera_refs(self) -> "MirageConfig":
-        for query in self.queries:
-            unknown = [c for c in query.cameras if c not in self.cameras]
-            if unknown:
-                raise ValueError(
-                    f"query {query.id!r} references unknown camera(s) {unknown}; known cameras: {sorted(self.cameras)}"
                 )
         return self
 

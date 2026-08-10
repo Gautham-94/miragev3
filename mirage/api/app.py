@@ -21,7 +21,6 @@ from mirage.api.routers import (
     notifications,
     onvif,
     ptz,
-    query_matches,
     recordings,
     review,
     system,
@@ -100,7 +99,6 @@ def create_app(
     app.include_router(events.router)
     app.include_router(onvif.router)
     app.include_router(ptz.router)
-    app.include_router(query_matches.router)
     app.include_router(recordings.router)
     app.include_router(review.router)
     app.include_router(live.router)

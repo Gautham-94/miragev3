@@ -16,9 +16,6 @@ import {
   LogEntry,
   OnvifDevice,
   OnvifResolveResult,
-  Query,
-  QueryMatch,
-  QueryWriteRequest,
   Recording,
   RecordingListParams,
   ReviewListParams,
@@ -135,14 +132,6 @@ export class ApiService {
     return this.http.get<LogEntry[]>(`${this.base}/api/system/logs`, { params: toHttpParams(params) });
   }
 
-  getOpenvocabSettings(): Observable<{ enabled: boolean }> {
-    return this.http.get<{ enabled: boolean }>(`${this.base}/api/config/openvocab`);
-  }
-
-  setOpenvocabEnabled(enabled: boolean): Observable<{ enabled: boolean }> {
-    return this.http.patch<{ enabled: boolean }>(`${this.base}/api/config/openvocab/enabled`, { enabled });
-  }
-
   getSystemCapabilities(): Observable<SystemCapabilities> {
     return this.http.get<SystemCapabilities>(`${this.base}/api/system/capabilities`);
   }
@@ -185,39 +174,6 @@ export class ApiService {
     return this.http.get<OnvifResolveResult>(`${this.base}/api/onvif/resolve`, {
       params: toHttpParams({ ip, port, username, password }),
     });
-  }
-
-  listQueries(): Observable<Query[]> {
-    return this.http.get<Query[]>(`${this.base}/api/config/queries`);
-  }
-
-  createQuery(req: QueryWriteRequest): Observable<Query> {
-    return this.http.post<Query>(`${this.base}/api/config/queries`, req);
-  }
-
-  updateQuery(id: string, req: QueryWriteRequest): Observable<Query> {
-    return this.http.put<Query>(`${this.base}/api/config/queries/${encodeURIComponent(id)}`, req);
-  }
-
-  deleteQuery(id: string): Observable<void> {
-    return this.http.delete<void>(`${this.base}/api/config/queries/${encodeURIComponent(id)}`);
-  }
-
-  listQueryMatches(
-    params: { camera?: string; queryId?: string; limit?: number; offset?: number } = {},
-  ): Observable<QueryMatch[]> {
-    return this.http.get<QueryMatch[]>(`${this.base}/api/query-matches`, {
-      params: toHttpParams({
-        camera: params.camera,
-        query_id: params.queryId,
-        limit: params.limit,
-        offset: params.offset,
-      }),
-    });
-  }
-
-  queryMatchThumbnailUrl(id: string): string {
-    return `${this.base}/api/query-matches/${encodeURIComponent(id)}/thumbnail`;
   }
 
   eventsStreamUrl(): string {
