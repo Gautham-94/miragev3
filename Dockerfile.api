@@ -6,6 +6,10 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# See Dockerfile.pipeline's identical step for why -- an old setuptools lacks the
+# build_editable hook (PEP 660) that `pip install -e .` below needs.
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 

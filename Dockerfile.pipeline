@@ -34,6 +34,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf /usr/bin/python3.11 /usr/bin/python3 \
     && ln -sf /usr/bin/python3.11 /usr/bin/python
 
+# Ubuntu 22.04's apt-packaged python3-pip ships a very old pip (~22) + setuptools
+# (~59.6), well below pyproject.toml's `requires = ["setuptools>=68"]" -- that old
+# setuptools lacks the build_editable hook (PEP 660), so `pip install -e .` below fails
+# with "build backend is missing the 'build_editable' hook" unless pip/setuptools are
+# upgraded first.
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
 WORKDIR /app
 
 # Dependencies first (own layer, cached across code-only changes). requirements-gpu.txt
