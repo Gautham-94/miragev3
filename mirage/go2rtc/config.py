@@ -9,6 +9,7 @@ without any extra name-mapping layer.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import yaml
@@ -17,6 +18,24 @@ from mirage.config.schema import CameraConfig, CameraRole, MirageConfig, RtspTra
 
 DEFAULT_API_PORT = 1984
 DEFAULT_WEBRTC_PORT = 8555
+
+
+def _env_webrtc_candidates() -> list[str]:
+    """Comma-separated `host:port` ICE candidates for go2rtc to advertise, from
+    MIRAGE_GO2RTC_WEBRTC_CANDIDATES (empty/unset = advertise nothing extra, the previous
+    behavior).
+
+    Only matters when go2rtc is NOT on the same host as the browser -- most importantly
+    inside Docker, where go2rtc gathers host candidates from the container's own bridge
+    interface (172.x.x.x) and offers only those. The browser can't route to a container
+    IP, so ICE has nothing usable to try, WebRTC fails, and every tile silently falls
+    back to the MSE tier. Setting this to the address the browser actually reaches
+    go2rtc on (e.g. "127.0.0.1:8555" for a browser on the Docker host, or the host's LAN
+    IP for other devices) gives ICE a candidate that resolves. The published container
+    port must match -- and be published for BOTH tcp and udp, since WebRTC needs udp.
+    """
+    raw = os.environ.get("MIRAGE_GO2RTC_WEBRTC_CANDIDATES", "")
+    return [candidate.strip() for candidate in raw.split(",") if candidate.strip()]
 
 
 def _detect_role_source(camera: CameraConfig) -> str | None:
@@ -45,6 +64,7 @@ def build_go2rtc_config(
     api_port: int = DEFAULT_API_PORT,
     webrtc_port: int = DEFAULT_WEBRTC_PORT,
     stream_overrides: dict[str, str] | None = None,
+    webrtc_candidates: list[str] | None = None,
 ) -> dict:
     """stream_overrides lets a caller point go2rtc at a DIFFERENT source URL than the
     camera's own detect-role ffmpeg input, keyed by camera name. Real cameras (RTSP)
@@ -63,6 +83,11 @@ def build_go2rtc_config(
         if source is not None:
             streams[camera.name] = source
 
+    candidates = _env_webrtc_candidates() if webrtc_candidates is None else webrtc_candidates
+    webrtc_section: dict = {"listen": f":{webrtc_port}", "ice_servers": []}
+    if candidates:
+        webrtc_section["candidates"] = candidates
+
     return {
         "streams": streams,
         "api": {"listen": f":{api_port}"},
@@ -72,8 +97,10 @@ def build_go2rtc_config(
         # srflx candidate pair that Chrome can end up preferring over the direct host
         # candidate pair, stalling connection setup instead of just using the LAN route.
         # An empty ice_servers list disables that default so only host candidates are
-        # offered.
-        "webrtc": {"listen": f":{webrtc_port}", "ice_servers": []},
+        # offered -- plus any explicitly advertised address from webrtc_candidates /
+        # MIRAGE_GO2RTC_WEBRTC_CANDIDATES (see _env_webrtc_candidates), which is what
+        # makes this work at all from inside a container.
+        "webrtc": webrtc_section,
         # go2rtc's own logging is noisy at default level; keep it to warnings so it
         # doesn't drown out mirage's own process logs when both run in the foreground.
         "log": {"format": "text", "level": "warn"},
@@ -86,8 +113,12 @@ def write_go2rtc_config(
     api_port: int = DEFAULT_API_PORT,
     webrtc_port: int = DEFAULT_WEBRTC_PORT,
     stream_overrides: dict[str, str] | None = None,
+    webrtc_candidates: list[str] | None = None,
 ) -> str:
-    payload = build_go2rtc_config(config, api_port=api_port, webrtc_port=webrtc_port, stream_overrides=stream_overrides)
+    payload = build_go2rtc_config(
+        config, api_port=api_port, webrtc_port=webrtc_port, stream_overrides=stream_overrides,
+        webrtc_candidates=webrtc_candidates,
+    )
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
         yaml.safe_dump(payload, f, sort_keys=False)

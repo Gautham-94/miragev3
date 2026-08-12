@@ -47,3 +47,6 @@ mirage.db-wal
 
 # Logs
 *.log
+
+# Local environment overrides -- contains camera credentials, never commit.
+.env

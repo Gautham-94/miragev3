@@ -48,7 +48,34 @@ services:
       - speciesnet-cache:/root/.cache/kagglehub
     ports:
       - "1984:1984" # go2rtc API/HTTP (snapshot fallback, direct debugging)
-      - "8555:8555" # go2rtc WebRTC
+      # go2rtc WebRTC. BOTH protocols are required: ICE does its connectivity checks and
+      # carries media over udp, so a tcp-only mapping (the bare "8555:8555" this used to
+      # be -- compose defaults to tcp) leaves every WebRTC connection failing to
+      # establish, silently demoting the frontend's Live tiles to the MSE tier.
+      - "8555:8555/tcp"
+      - "8555:8555/udp"
+    environment:
+      # Address the BROWSER can reach go2rtc on, advertised as an ICE candidate (see
+      # mirage/go2rtc/config.py's _env_webrtc_candidates). Without it go2rtc offers only
+      # its container-internal bridge IP (172.x.x.x), which no browser can route to, so
+      # WebRTC never connects. 127.0.0.1 covers a browser on this Docker host; add this
+      # machine's LAN IP (comma-separated, e.g. "127.0.0.1:8555,192.168.1.50:8555") to
+      # also reach it from phones/other machines on the network.
+      MIRAGE_GO2RTC_WEBRTC_CANDIDATES: "127.0.0.1:8555"
+    # Keep go2rtc pointed at the PHYSICAL camera while each camera's own configured
+    # rtsp_url points at go2rtc's restream (rtsp://127.0.0.1:8554/<camera>) -- ffmpeg's
+    # RTSP client could not hold a direct session to this camera for more than a few
+    # seconds, while go2rtc's holds it indefinitely, so routing capture/record through
+    # go2rtc's restream gives one stable camera connection shared by everything. Without
+    # this override mirage would generate go2rtc's stream list FROM the camera's rtsp_url
+    # and go2rtc would end up pointing at its own restream (see build_go2rtc_config).
+    # The URL is read from CAM1_RTSP_URL in a local .env file (gitignored) rather than
+    # inlined here -- it embeds the camera's credentials, and this file is committed.
+    # See .env.example. The `:?` form fails the `up` with a clear message instead of
+    # silently starting go2rtc with an empty source if the variable isn't set.
+    command:
+      - "--go2rtc-source"
+      - "cam1=${CAM1_RTSP_URL:?set CAM1_RTSP_URL in .env (see .env.example)}"
     restart: unless-stopped
 
   api:
