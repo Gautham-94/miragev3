@@ -147,5 +147,14 @@ export class WebRtcPlayer {
     this.ws = null;
     this.pc?.close();
     this.pc = null;
+    // Release the video element for the next tier. The `track` handler above assigns
+    // videoEl.srcObject, and per the HTML spec srcObject takes precedence over the src
+    // attribute -- so leaving it set here means CameraTile's WebRTC->MSE fallback
+    // (onTierFailed -> tryMse -> MsePlayer.start()'s `videoEl.src = objectUrl`) is
+    // silently ignored: the MediaSource never reaches "open", its sourceopen event never
+    // fires, MsePlayer never opens its WebSocket, and -- because nothing errors either --
+    // the tile sits in 'connecting' forever showing the snapshot poster ("STILL") instead
+    // of falling through to a working MSE stream.
+    this.videoEl.srcObject = null;
   }
 }
