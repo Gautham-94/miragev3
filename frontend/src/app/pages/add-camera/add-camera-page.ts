@@ -3,7 +3,7 @@ import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, Router } from '@angular/router';
 
 import { ApiService } from '../../core/services/api.service';
-import { Detector, OnvifDevice, RtspTransport } from '../../core/models/api.models';
+import { Detector, LabelFilter, OnvifDevice, RtspTransport } from '../../core/models/api.models';
 import { Icon } from '../../shared/icon/icon';
 
 type EntryMode = 'choose' | 'scan' | 'manual';
@@ -51,6 +51,13 @@ export class AddCameraPage implements OnInit {
   // valid values sitting in the bound plain properties, because canSubmitDetails() had
   // no signal to react to and simply never recomputed after its first (empty) read.
   protected readonly resolvedRtspUrl = signal('');
+  // Optional -- a real, cheap low-resolution stream URL (e.g. a Hikvision-style
+  // Channels/102 substream) go2rtc should pull directly for the live-view grid tier
+  // instead of transcoding one itself from the main stream above. See
+  // mirage.config.schema.CameraConfig.live_sub_url's own docstring for why this
+  // matters at all -- left blank, the grid tile still works, just via a costlier
+  // server-side ffmpeg transcode of the main stream.
+  protected readonly liveSubUrl = signal('');
   protected readonly cameraName = signal('');
   protected readonly selectedDetector = signal('');
   protected readonly trackObjectsInput = signal('person');
@@ -88,14 +95,19 @@ export class AddCameraPage implements OnInit {
   // for at least this long (covers both loitering and queue-wait-time).
   protected readonly crowdThreshold = signal<number | null>(null);
   protected readonly dwellSeconds = signal<number | null>(null);
-  // See ObjectFilterConfig's own docstring -- minScore gates whether a raw detection is
-  // tracked at all; confirmScore gates whether a tracked object's median score is ever
+  // See ObjectFilterConfig's own docstring -- min_score gates whether a raw detection is
+  // tracked at all; threshold ("Confirm score" in the UI -- "threshold" alone reads
+  // ambiguous next to Min score) gates whether a tracked object's median score is ever
   // promoted from false_positive to true-positive (and therefore shown in Events/
-  // Review). Named confirmScore in the UI ("threshold" alone reads ambiguous next to
-  // Min score) but maps to the backend's `threshold` field. Defaults mirror
-  // ObjectFilterConfig's own schema defaults (0.5/0.7) for a brand-new camera.
-  protected readonly minScore = signal(0.5);
-  protected readonly confirmScore = signal(0.7);
+  // Review). Keyed per-label (e.g. "animal"/"person"/"vehicle" for the MegaDetector
+  // plugins) -- a real bug this replaces: a single shared pair used to silently write
+  // to whichever label happened to be Track objects[0], leaving every other label (
+  // including ones only tracked via Track all) stuck on the 0.5/0.7 schema default with
+  // no way to change them. availableLabels drives row order/presence; refreshed
+  // whenever the selected detector changes (onDetectorChange) so it always matches that
+  // detector's own labelmap.
+  protected readonly availableLabels = signal<string[]>([]);
+  protected readonly labelFilters = signal<Record<string, LabelFilter>>({});
 
   protected readonly detectors = signal<Detector[]>([]);
   protected readonly saving = signal(false);
@@ -120,7 +132,10 @@ export class AddCameraPage implements OnInit {
     this.api.listDetectors().subscribe({
       next: (detectors) => {
         this.detectors.set(detectors);
-        if (detectors.length > 0 && !this.selectedDetector()) this.selectedDetector.set(detectors[0].name);
+        if (detectors.length > 0 && !this.selectedDetector()) {
+          this.selectedDetector.set(detectors[0].name);
+          this.loadLabelsForDetector(detectors[0].name);
+        }
       },
       error: () => this.detectors.set([]),
     });
@@ -133,6 +148,7 @@ export class AddCameraPage implements OnInit {
         next: (cam) => {
           this.cameraName.set(cam.name);
           this.resolvedRtspUrl.set(cam.rtsp_url);
+          this.liveSubUrl.set(cam.live_sub_url ?? '');
           this.selectedDetector.set(cam.detector);
           this.trackObjectsInput.set(cam.track_objects.join(', '));
           this.trackAll.set(cam.track_all);
@@ -147,8 +163,11 @@ export class AddCameraPage implements OnInit {
           this.detectionLabelsInput.set(cam.detection_labels.join(', '));
           this.crowdThreshold.set(cam.crowd_threshold);
           this.dwellSeconds.set(cam.dwell_seconds);
-          this.minScore.set(cam.min_score);
-          this.confirmScore.set(cam.threshold);
+          // cam.filters already covers every label this camera's OWN detector declares
+          // (see mirage.api.routers.config._camera_config_out), so this is authoritative
+          // -- no separate getDetectorLabels call needed for the initial load.
+          this.availableLabels.set(Object.keys(cam.filters));
+          this.labelFilters.set(cam.filters);
           this.step.set('details');
         },
         error: (err) => {
@@ -161,6 +180,37 @@ export class AddCameraPage implements OnInit {
 
   protected get isEditMode(): boolean {
     return this.editingCameraName() !== null;
+  }
+
+  protected onDetectorChange(name: string): void {
+    this.selectedDetector.set(name);
+    this.loadLabelsForDetector(name);
+  }
+
+  // Fetches the newly-selected detector's real label set and refreshes the per-label
+  // filter rows to match -- keeps any label that already has a row (e.g. switching
+  // detectors and back), defaults a genuinely new label to ObjectFilterConfig's own
+  // schema defaults (0.5/0.7). Never removes an existing entry from labelFilters (a
+  // label no longer in availableLabels just stops being submitted -- see submit()),
+  // so switching detectors and back loses nothing.
+  private loadLabelsForDetector(name: string): void {
+    this.api.getDetectorLabels(name).subscribe({
+      next: (labels) => {
+        this.availableLabels.set(labels);
+        const current = this.labelFilters();
+        const next = { ...current };
+        for (const label of labels) {
+          if (!(label in next)) next[label] = { min_score: 0.5, threshold: 0.7 };
+        }
+        this.labelFilters.set(next);
+      },
+      error: () => this.availableLabels.set([]),
+    });
+  }
+
+  protected updateLabelFilter(label: string, field: 'min_score' | 'threshold', value: number): void {
+    const current = this.labelFilters()[label] ?? { min_score: 0.5, threshold: 0.7 };
+    this.labelFilters.set({ ...this.labelFilters(), [label]: { ...current, [field]: value } });
   }
 
   // --- Entry step ---
@@ -273,6 +323,7 @@ export class AddCameraPage implements OnInit {
     const payload = {
       name: this.cameraName().trim(),
       rtsp_url: this.resolvedRtspUrl().trim(),
+      live_sub_url: this.liveSubUrl().trim() || null,
       detector: this.selectedDetector(),
       track_objects: trackObjects.length > 0 ? trackObjects : ['person'],
       track_all: this.trackAll(),
@@ -291,8 +342,14 @@ export class AddCameraPage implements OnInit {
       detection_labels: detectionLabels,
       crowd_threshold: this.crowdThreshold(),
       dwell_seconds: this.dwellSeconds(),
-      min_score: this.minScore(),
-      threshold: this.confirmScore(),
+      // Only labels currently shown as rows (availableLabels, this detector's own real
+      // label set) are sent -- the backend merges (see
+      // mirage.api.routers.config._build_camera_config), so a label from a PREVIOUSLY
+      // selected detector that's no longer relevant here is simply left untouched on
+      // the backend rather than resubmitted with a stale/default value.
+      filters: Object.fromEntries(
+        this.availableLabels().map((label) => [label, this.labelFilters()[label] ?? { min_score: 0.5, threshold: 0.7 }]),
+      ),
     };
 
     const request = this.isEditMode
@@ -330,6 +387,7 @@ export class AddCameraPage implements OnInit {
     this.onvifUsername.set('');
     this.onvifPassword.set('');
     this.resolvedRtspUrl.set('');
+    this.liveSubUrl.set('');
     this.cameraName.set('');
     this.trackObjectsInput.set('person');
     this.trackAll.set(false);

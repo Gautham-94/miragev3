@@ -21,7 +21,7 @@
         <button type="button" class="review-card" (click)="select(segment)">
           <div class="thumb">
             @if (segment.thumb_path) {
-              <img [src]="thumbnailUrl(segment)" [alt]="segment.camera" />
+              <img [src]="thumbnailUrl(segment)" [alt]="segment.camera" loading="lazy" fetchpriority="low" />
             } @else {
               <div class="thumb-placeholder">
                 <app-icon name="imageOff" [size]="22" />

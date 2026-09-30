@@ -10,8 +10,13 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException
+from starlette.responses import FileResponse, Response
 
 from mirage.api.routers import (
     cameras,
@@ -32,6 +37,33 @@ from mirage.db.database import close_database, init_database
 from mirage.go2rtc.config import DEFAULT_API_PORT
 
 
+class _SPAStaticFiles(StaticFiles):
+    """Serves the Angular build like a normal static dir, except any GET that doesn't
+    resolve to a real file (a client-side route like /live or /review, not an actual
+    asset) falls back to index.html so Angular's own router can take over -- same
+    fallback every SPA host (nginx try_files, Vercel, etc.) needs. StaticFiles' own
+    html=True only covers directory-index lookups, not arbitrary unmatched paths.
+
+    This mount is registered LAST, so it only ever sees requests no /api/* router
+    already claimed -- but that still includes a MISTYPED or removed /api/* path (no
+    router matches it either), which must surface as a real 404, not silently serve
+    the frontend's index.html and mask a broken API call as a successful page load.
+    """
+
+    async def get_response(self, path: str, scope) -> Response:
+        try:
+            return await super().get_response(path, scope)
+        except HTTPException as exc:
+            is_api_path = scope["path"].startswith("/api/") or scope["path"] == "/api"
+            # Only a real "no such file" (404) on a non-API path falls back to
+            # index.html -- a 405 (e.g. POST to a static path), anything else, or any
+            # /api/* miss propagates as a genuine error instead of being silently
+            # masked as a successful page load.
+            if exc.status_code != 404 or scope["method"] not in ("GET", "HEAD") or is_api_path:
+                raise
+            return FileResponse(Path(self.directory) / "index.html")
+
+
 def create_app(
     config: MirageConfig | None = None,
     db_path: str | None = None,
@@ -40,6 +72,7 @@ def create_app(
     go2rtc_api_port: int = DEFAULT_API_PORT,
     export_dir: str = DEFAULT_EXPORT_DIR,
     cache_dir: str = DEFAULT_CACHE_DIR,
+    static_dir: str | None = None,
 ) -> FastAPI:
     """`config`, if given, is used as a FIXED override for the lifetime of this app --
     only ever passed by tests that construct a MirageConfig directly without a real DB.
@@ -58,6 +91,13 @@ def create_app(
     point stitched review clips at a throwaway tmp_path instead of the real module-level
     EXPORT_DIR constant -- avoids monkeypatching an env var and reloading mirage.const,
     which would leak global state across tests.
+
+    `static_dir`, if given, mounts the Angular production build (the `browser/`
+    subfolder of `ng build`'s output) at `/` with SPA fallback, so this one process can
+    serve both the API and the UI -- what the packaged desktop app (mirage/desktop/
+    launcher.py) points pywebview at instead of running a separate `ng serve`. None
+    (the default) leaves routing exactly as it is today: pure API, frontend served by
+    its own dev server with CORS bridging the two origins.
     """
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -107,5 +147,11 @@ def create_app(
     @app.get("/api/health")
     def health() -> dict:
         return {"status": "ok"}
+
+    # Mounted LAST and at the root: FastAPI matches routes in registration order, so
+    # every /api/* router above still wins its own path before this catch-all static
+    # mount ever sees a request.
+    if static_dir is not None:
+        app.mount("/", _SPAStaticFiles(directory=static_dir, html=True), name="frontend")
 
     return app

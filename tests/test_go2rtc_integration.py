@@ -5,8 +5,6 @@ that the process starts and the config parses.
 
 from __future__ import annotations
 
-import os
-import signal
 import socket
 import subprocess as sp
 import tempfile
@@ -26,6 +24,7 @@ from mirage.config.schema import (
     ModelConfig,
 )
 from mirage.go2rtc.process import Go2rtcProcess
+from tests.conftest import kill_process_group
 
 STREAM_PORT = 19510
 API_PORT = 19584
@@ -36,17 +35,6 @@ def _port_open(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(0.5)
         return s.connect_ex(("127.0.0.1", port)) == 0
-
-
-def _kill_process_group(proc: sp.Popen) -> None:
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    try:
-        proc.wait(timeout=5)
-    except sp.TimeoutExpired:
-        pass
 
 
 @pytest.fixture
@@ -70,13 +58,12 @@ def video_server():
             pytest.fail("video test server exited before listening")
         time.sleep(0.1)
     else:
-        _kill_process_group(proc)
+        kill_process_group(proc)
         pytest.fail("video test server never started listening")
 
     yield f"tcp://127.0.0.1:{STREAM_PORT}"
 
-    _kill_process_group(proc)
-    sp.run(["pkill", "-9", "-f", str(STREAM_PORT)], stdout=sp.DEVNULL, stderr=sp.DEVNULL)
+    kill_process_group(proc)
 
 
 def test_go2rtc_restreams_a_real_live_source(video_server):

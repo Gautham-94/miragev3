@@ -107,6 +107,14 @@ export interface SystemStatus {
   updated_at: number | null;
 }
 
+export interface SpeciesConfig {
+  enabled: boolean;
+}
+
+export interface HwaccelConfig {
+  enabled: boolean;
+}
+
 export interface Detector {
   name: string;
   device: string;
@@ -140,6 +148,12 @@ export type RtspTransport = 'tcp' | 'udp';
 export interface CameraWriteRequest {
   name: string;
   rtsp_url: string;
+  // Optional cheap, low-resolution stream URL for the live-view grid tier (e.g. a
+  // Hikvision-style Channels/102 substream) -- see
+  // mirage.config.schema.CameraConfig.live_sub_url's own docstring. Left unset,
+  // go2rtc transcodes the main stream down for the grid instead -- always works, just
+  // costs an extra ffmpeg process per camera.
+  live_sub_url?: string | null;
   detector: string;
   track_objects?: string[];
   track_all?: boolean;
@@ -163,10 +177,16 @@ export interface CameraWriteRequest {
   // See mirage.config.schema.ObjectFilterConfig's docstring -- min_score gates whether a
   // raw detection is tracked at all; threshold gates whether a tracked object's median
   // score is ever promoted from false_positive to true-positive (and therefore shown in
-  // Events/Review). Both undefined/null keep ObjectFilterConfig's own schema defaults
-  // (0.5/0.7).
-  min_score?: number | null;
-  threshold?: number | null;
+  // Events/Review). Keyed per-label (e.g. "animal"/"person"/"vehicle" -- see
+  // ApiService.getDetectorLabels), NOT one shared value applied to every tracked label
+  // uniformly. A label left out of this map keeps its existing filter untouched on the
+  // backend (merge, not replace) -- undefined/omitted entirely keeps every label as-is.
+  filters?: Record<string, LabelFilter>;
+}
+
+export interface LabelFilter {
+  min_score: number;
+  threshold: number;
 }
 
 export interface CameraConfigDetail {
@@ -181,14 +201,17 @@ export interface CameraConfigDetail {
   track_all: boolean;
   rtsp_url: string;
   rtsp_transport: RtspTransport;
+  live_sub_url: string | null;
   retain_days: number;
   segment_seconds: number;
   alert_labels: string[];
   detection_labels: string[];
   crowd_threshold: number | null;
   dwell_seconds: number | null;
-  min_score: number;
-  threshold: number;
+  // Keyed by every label the camera's assigned detector's labelmap declares, not just
+  // whatever's in track_objects -- a label only tracked via track_all still gets its
+  // own row. See CameraWriteRequest.filters.
+  filters: Record<string, LabelFilter>;
 }
 
 export interface ConfigMutationResponse {

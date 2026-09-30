@@ -16,7 +16,7 @@ process restart is simpler to reason about and matches how this system already b
 before hot-reload was attempted (the ONLY thing this file changes is making that restart
 a UI button instead of a terminal command).
 
-IPC with mirage.api (a separate, independently-started process) is via two small files
+IPC with mirage.api (a separate, independently-started process) is via small files
 under the same cache_dir every other IPC mechanism in this codebase already uses (see
 mirage/const.py's ipc_addr) -- no new dependency (no socket, no message broker):
   - STATUS_FILENAME: this process writes its current state as JSON after every
@@ -25,8 +25,12 @@ mirage/const.py's ipc_addr) -- no new dependency (no socket, no message broker):
   - RESTART_REQUEST_FILENAME: mirage/api/routers/system.py writes an empty sentinel file
     here when the user presses "Apply changes" (POST /api/system/restart) -- this
     process polls for that file's existence once a second and, when found, deletes it
-    and performs a restart (SIGTERM the running pipeline, wait for clean exit, start a
-    fresh one).
+    and performs a restart (ask the running pipeline to stop, wait for clean exit,
+    start a fresh one).
+  - STOP_REQUEST_FILENAME: how "ask the running pipeline to stop" above is actually
+    implemented on Windows -- see _stop_pipeline()'s own comment for why this exists
+    (Popen.send_signal(SIGTERM) doesn't work the way it does on POSIX there) and
+    mirage.__main__'s main loop for the other end of this same file-based handshake.
 """
 
 from __future__ import annotations
@@ -46,6 +50,7 @@ logger = logging.getLogger("mirage.supervisor")
 
 STATUS_FILENAME = "supervisor_status.json"
 RESTART_REQUEST_FILENAME = "restart_requested"
+STOP_REQUEST_FILENAME = "stop_requested"
 
 POLL_INTERVAL_SECONDS = 1.0
 GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS = 20.0
@@ -69,6 +74,7 @@ class PipelineSupervisor:
         self.pipeline_command = pipeline_command or [sys.executable, "-m", "mirage", *pipeline_args]
         self.status_path = Path(cache_dir) / STATUS_FILENAME
         self.restart_request_path = Path(cache_dir) / RESTART_REQUEST_FILENAME
+        self.stop_request_path = Path(cache_dir) / STOP_REQUEST_FILENAME
         self.process: subprocess.Popen | None = None
         self._stop_requested = False
 
@@ -88,6 +94,13 @@ class PipelineSupervisor:
     # ------------------------------------------------------------------
 
     def _start_pipeline(self) -> None:
+        # A stop-request file can only ever be left behind by an instance that got hard-
+        # killed before reaching the unlink() in mirage.__main__'s own loop (e.g. the
+        # GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS fallback below actually firing) -- if left in
+        # place, the brand-new pipeline process spawned right below would see it on its
+        # very first poll and immediately shut itself back down. Same stale-request
+        # cleanup pattern run() already does for restart_request_path.
+        self.stop_request_path.unlink(missing_ok=True)
         self._write_status("starting")
         logger.info("starting pipeline: %s", " ".join(self.pipeline_command))
         self.process = subprocess.Popen(self.pipeline_command)
@@ -98,7 +111,34 @@ class PipelineSupervisor:
             return
         self._write_status("stopping", pid=self.process.pid)
         logger.info("stopping pipeline (pid=%d)", self.process.pid)
-        self.process.send_signal(signal.SIGTERM)
+        if sys.platform == "win32":
+            # Popen.send_signal(SIGTERM) on Windows is NOT a real, catchable signal --
+            # CPython implements it as a plain TerminateProcess() call (see the stdlib
+            # subprocess docs' own note on this), which is an unconditional, immediate
+            # OS-level kill that never gives the target process a chance to run its
+            # registered signal handler, let alone any cleanup code. Confirmed live:
+            # mirage.__main__'s SIGTERM handler IS correctly written and would work
+            # fine on POSIX, but on Windows it simply never fires -- the pipeline
+            # process was dying in under 30ms every restart (a hard kill, not a clean
+            # exit) and every child it owns (go2rtc.exe, ffmpeg.exe, every detector/
+            # tracker/species worker process) was being orphaned on every single
+            # "Apply changes", silently accumulating -- e.g. three live go2rtc.exe
+            # processes all fighting over the same ports after three restarts, the
+            # newest ones unable to bind and the oldest one left serving a stale
+            # config that never picked up a just-added camera.
+            #
+            # The fix: a file-based "please stop" request, the same IPC pattern this
+            # class already uses for restart requests -- mirage.__main__'s own main
+            # loop polls for this file (already polling every 0.5s regardless) and
+            # exits its loop when it appears, running the SAME graceful app.stop()
+            # path a real POSIX SIGTERM would have triggered. Deliberately NOT used on
+            # POSIX too "for consistency" -- real SIGTERM delivery there is simpler,
+            # already proven correct, and involves strictly fewer moving parts than a
+            # polling handshake.
+            self.stop_request_path.parent.mkdir(parents=True, exist_ok=True)
+            self.stop_request_path.write_text("")
+        else:
+            self.process.send_signal(signal.SIGTERM)
         try:
             self.process.wait(timeout=GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
@@ -114,6 +154,14 @@ class PipelineSupervisor:
     # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
+
+    def request_stop(self) -> None:
+        """Non-signal equivalent of SIGINT/SIGTERM for embedders that don't have a
+        terminal to send a real OS signal from -- e.g. mirage/desktop/launcher.py's
+        window-closed handler, driving this same run() loop from a background thread
+        where register_signal_handlers() (main-thread only) was never called.
+        """
+        self._stop_requested = True
 
     def register_signal_handlers(self) -> None:
         """Only callable from the process's real main thread (a hard Python/OS

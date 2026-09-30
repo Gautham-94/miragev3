@@ -16,11 +16,11 @@ from __future__ import annotations
 
 import datetime
 import logging
-import subprocess as sp
 import tempfile
 from pathlib import Path
 
 from mirage.db.models import Recordings
+from mirage.util.proc import run_capturing
 
 logger = logging.getLogger(__name__)
 
@@ -70,17 +70,17 @@ def stitch_recordings(recordings: list[Recordings], dest_path: Path, ffmpeg_path
             f.write(f"file '{escaped}'\n")
 
     try:
-        result = sp.run(
+        result = run_capturing(
             [ffmpeg_path, "-hide_banner", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list_path),
              "-c", "copy", "-movflags", "+faststart", str(dest_path)],
-            capture_output=True, text=True, timeout=STITCH_TIMEOUT_SECONDS,
+            timeout=STITCH_TIMEOUT_SECONDS,
         )
-    except (sp.TimeoutExpired, OSError) as e:
-        logger.error("stitch_recordings: ffmpeg failed: %s", e)
-        return False
     finally:
         concat_list_path.unlink(missing_ok=True)
 
+    if result is None:
+        logger.error("stitch_recordings: ffmpeg timed out or could not start")
+        return False
     if result.returncode != 0:
         logger.error("stitch_recordings: ffmpeg concat failed: %s", result.stderr[-500:])
         return False

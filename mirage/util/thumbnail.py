@@ -137,9 +137,17 @@ ThumbnailFetcher = Callable[[str], Optional[bytes]]
 # go2rtc's own frame.jpeg endpoint has been observed (see IMPLEMENTATION_NOTES.md) to
 # return a 200 OK with an EMPTY body during a brief transient window -- specifically,
 # whenever it hasn't buffered a real keyframe recently (e.g. right after a stream
-# (re)connects). A single retry after a short pause absorbs this without meaningfully
-# delaying event/review-segment creation (this call already happens at most a handful
-# of times a minute, never per-frame).
+# (re)connects). A single 0.5s retry used to be the whole story here, but that's not
+# enough right after a pipeline restart: an RTSP source can easily take several seconds
+# to reconnect and hand go2rtc its first keyframe, and a segment that starts in that
+# window got permanently stuck with thumb_path=None -- confirmed live (a review
+# segment created moments after a restart, with every later segment's thumbnail
+# loading fine once the stream caught up). Backs off geometrically instead of a single
+# fixed-delay retry so the total wait stays bounded (~7.5s worst case across
+# _RETRY_ATTEMPTS) while giving a freshly-reconnecting camera realistic time to produce
+# a keyframe -- still fine for a call that happens at most a handful of times a minute,
+# never per-frame.
+_RETRY_ATTEMPTS = 5
 _RETRY_DELAY_SECONDS = 0.5
 
 
@@ -171,7 +179,7 @@ def capture_thumbnail(
 
 
 def _fetch_with_retry(fetcher: ThumbnailFetcher, camera_name: str, filename_stem: str) -> bytes | None:
-    for attempt in range(2):
+    for attempt in range(_RETRY_ATTEMPTS):
         try:
             jpeg_bytes = fetcher(camera_name)
         except Exception:
@@ -179,6 +187,6 @@ def _fetch_with_retry(fetcher: ThumbnailFetcher, camera_name: str, filename_stem
             jpeg_bytes = None
         if jpeg_bytes:
             return jpeg_bytes
-        if attempt == 0:
-            time.sleep(_RETRY_DELAY_SECONDS)
+        if attempt < _RETRY_ATTEMPTS - 1:
+            time.sleep(_RETRY_DELAY_SECONDS * (2**attempt))
     return None

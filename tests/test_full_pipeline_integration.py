@@ -8,9 +8,7 @@ end.
 from __future__ import annotations
 
 import multiprocessing as mp
-import os
 import shutil
-import signal
 import socket
 import subprocess as sp
 import tempfile
@@ -36,6 +34,7 @@ from mirage.detection.process import DetectorProcess
 from mirage.ipc.zmq_pubsub import ZmqProxy
 from mirage.tracking.camera_tracker import CameraTracker
 from mirage.util.shm import SharedMemoryFrameManager, preallocate_ring, teardown_ring
+from tests.conftest import kill_process_group
 
 MODEL_PATH = Path(__file__).resolve().parent.parent / "models" / "yolov8n.onnx"
 LABELMAP_PATH = Path(__file__).resolve().parent.parent / "models" / "coco_labelmap.txt"
@@ -52,22 +51,6 @@ def _port_open(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
-def _kill_process_group(proc: sp.Popen) -> None:
-    """SIGKILL the whole process group (the sh -c wrapper and every ffmpeg child it has
-    spawned), rather than just proc.terminate() -- this codebase's own findings
-    (IMPLEMENTATION_NOTES.md section 3b) show ffmpeg reading a live socket connection can
-    be slow to react even to SIGTERM, so a plain terminate()+wait() is not reliable here.
-    """
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    try:
-        proc.wait(timeout=5)
-    except sp.TimeoutExpired:
-        pass
-
-
 @pytest.fixture
 def tcp_video_server():
     # A real, continuously-live source with actual moving content (not a static test
@@ -77,7 +60,8 @@ def tcp_video_server():
     # selection (not just the one-time startup scan).
     # start_new_session=True puts the "sh -c ... while true ..." wrapper (and the ffmpeg
     # children it spawns, which inherit the same process group) in their own process
-    # group, so os.killpg can reliably take down the whole tree in one shot at teardown.
+    # group, so kill_process_group (tests/conftest.py) can reliably take down the whole
+    # tree in one shot at teardown.
     proc = sp.Popen(
         [
             "sh", "-c",
@@ -96,19 +80,12 @@ def tcp_video_server():
             pytest.fail("video test server exited before listening")
         time.sleep(0.1)
     else:
-        _kill_process_group(proc)
+        kill_process_group(proc)
         pytest.fail("video test server never started listening")
 
     yield STREAM_URL
 
-    _kill_process_group(proc)
-    # Belt-and-suspenders: also sweep by port number, in case some ffmpeg instance
-    # somehow escaped the process group (e.g. a race where the shell loop spawned a new
-    # child in the brief window before the group signal was delivered) -- this codebase's
-    # own findings (IMPLEMENTATION_NOTES.md section 3b) show ffmpeg reading a live socket
-    # can be slow to react even to SIGTERM, so a stray survivor is a real possibility,
-    # not just theoretical.
-    sp.run(["pkill", "-9", "-f", str(STREAM_PORT)], stdout=sp.DEVNULL, stderr=sp.DEVNULL)
+    kill_process_group(proc)
 
 
 @pytest.fixture

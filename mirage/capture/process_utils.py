@@ -8,6 +8,8 @@ from __future__ import annotations
 import logging
 import subprocess as sp
 
+from mirage.util.proc import windows_no_console_flags
+
 logger = logging.getLogger(__name__)
 
 
@@ -20,6 +22,7 @@ def start_ffmpeg(cmd: list[str], needs_stdout_pipe: bool, frame_size: int = 0, s
             stdin=sp.DEVNULL,
             bufsize=frame_size * 10,  # room for 10 raw frames in the pipe buffer
             start_new_session=True,  # own process group: clean signal handling
+            creationflags=windows_no_console_flags(),
         )
     return sp.Popen(
         cmd,
@@ -27,6 +30,7 @@ def start_ffmpeg(cmd: list[str], needs_stdout_pipe: bool, frame_size: int = 0, s
         stderr=stderr if stderr is not None else sp.DEVNULL,
         stdin=sp.DEVNULL,
         start_new_session=True,
+        creationflags=windows_no_console_flags(),
     )
 
 

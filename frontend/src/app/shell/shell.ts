@@ -31,6 +31,7 @@ export class Shell implements OnInit {
     { path: '/review', label: 'Review', icon: 'grid' },
     { path: '/live', label: 'Live', icon: 'video' },
     { path: '/events', label: 'Events', icon: 'target' },
+    { path: '/detections', label: 'Detections', icon: 'search' },
     { path: '/recordings', label: 'Recordings', icon: 'film' },
     { path: '/cameras', label: 'Cameras', icon: 'settings' },
     { path: '/detectors', label: 'Detectors', icon: 'cpu' },
@@ -81,6 +82,19 @@ export class Shell implements OnInit {
   private applyStatus(state: SystemState): void {
     const wasRestarting = this.wasRestarting;
     const isRestartingNow = state === 'starting' || state === 'stopping';
+    // Captured BEFORE this.systemState.set() below -- true means the user pressed the
+    // button and we haven't yet confirmed completion, independent of whether a poll
+    // happened to land on "starting"/"stopping" in between. A full restart (supervisor
+    // SIGTERMs the old process, then Popen()s a new one, writing "running" immediately
+    // after -- see mirage/supervisor.py's _start_pipeline()) can complete in well under
+    // this page's own 1.5s poll interval, especially with nothing slow to shut down --
+    // confirmed live: the status file already read "running" while the sidebar stayed
+    // stuck on "restarting" indefinitely. Relying on wasRestarting alone silently
+    // requires the poll to have caught the transient starting/stopping window; when it
+    // doesn't (this poll jumps straight from the pre-restart "running" to the
+    // post-restart "running"), that transition is never observed and the optimistic
+    // flag never gets cleared by anything.
+    const hadPendingLocalRequest = this.restartRequestedLocally();
 
     this.systemState.set(state);
 
@@ -90,7 +104,7 @@ export class Shell implements OnInit {
       this.restartRequestedLocally.set(false);
     }
 
-    if (wasRestarting && state === 'running') {
+    if (state === 'running' && (wasRestarting || hadPendingLocalRequest)) {
       this.restartRequestedLocally.set(false);
       this.showReadyBanner.set(true);
       if (this.readyBannerTimeout) clearTimeout(this.readyBannerTimeout);

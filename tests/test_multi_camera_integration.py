@@ -8,9 +8,7 @@ activity while genuinely sharing one DetectorProcess (only one process is spawne
 
 from __future__ import annotations
 
-import os
 import shutil
-import signal
 import socket
 import subprocess as sp
 import tempfile
@@ -35,6 +33,7 @@ from mirage.config.schema import (
     RetainConfig,
 )
 from mirage.db.models import Recordings
+from tests.conftest import kill_process_group
 
 MODEL_PATH = Path(__file__).resolve().parent.parent / "models" / "yolov8n.onnx"
 LABELMAP_PATH = Path(__file__).resolve().parent.parent / "models" / "coco_labelmap.txt"
@@ -48,17 +47,6 @@ def _port_open(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(0.5)
         return s.connect_ex(("127.0.0.1", port)) == 0
-
-
-def _kill_process_group(proc: sp.Popen) -> None:
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    try:
-        proc.wait(timeout=5)
-    except sp.TimeoutExpired:
-        pass
 
 
 def _start_video_server(port: int, pattern: str) -> sp.Popen:
@@ -81,7 +69,7 @@ def _start_video_server(port: int, pattern: str) -> sp.Popen:
         if proc.poll() is not None:
             pytest.fail(f"video test server on port {port} exited before listening")
         time.sleep(0.1)
-    _kill_process_group(proc)
+    kill_process_group(proc)
     pytest.fail(f"video test server on port {port} never started listening")
 
 
@@ -96,10 +84,8 @@ def two_video_servers():
 
     yield f"tcp://127.0.0.1:{STREAM_PORT_1}", f"tcp://127.0.0.1:{STREAM_PORT_2}"
 
-    _kill_process_group(proc1)
-    _kill_process_group(proc2)
-    sp.run(["pkill", "-9", "-f", str(STREAM_PORT_1)], stdout=sp.DEVNULL, stderr=sp.DEVNULL)
-    sp.run(["pkill", "-9", "-f", str(STREAM_PORT_2)], stdout=sp.DEVNULL, stderr=sp.DEVNULL)
+    kill_process_group(proc1)
+    kill_process_group(proc2)
 
 
 @pytest.fixture

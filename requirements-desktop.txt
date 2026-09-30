@@ -1,0 +1,11 @@
+# Packaging-only additions on top of requirements.txt -- install into the SAME main
+# .venv used to run `python -m mirage`/`python -m mirage.api` from source:
+#
+#   .venv\Scripts\pip install -r requirements.txt -r requirements-desktop.txt
+#
+# Kept separate from requirements.txt (rather than folded in) so a plain server/dev
+# install never pulls in pywebview + PyInstaller for no reason -- only someone actually
+# building the desktop package needs these.
+pywebview==5.4.*
+pythonnet==3.0.*
+pyinstaller==6.11.*

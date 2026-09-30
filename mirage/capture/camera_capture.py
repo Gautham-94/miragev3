@@ -29,6 +29,7 @@ class CameraCapture(mp.Process):
         camera_fps_value,
         skipped_fps_value,
         stop_event,
+        verbose: bool = False,
     ) -> None:
         super().__init__(name=f"capture:{camera.name}")
         self.camera = camera
@@ -39,6 +40,7 @@ class CameraCapture(mp.Process):
         self.camera_fps_value = camera_fps_value
         self.skipped_fps_value = skipped_fps_value
         self.stop_event = stop_event
+        self.verbose = verbose
 
     def run(self) -> None:
         try:
@@ -46,7 +48,9 @@ class CameraCapture(mp.Process):
         except (AttributeError, PermissionError, OSError):
             pass  # best-effort; not fatal if the OS/user can't raise priority
 
-        logging.basicConfig(level=logging.INFO)
+        # See mirage.tracking.camera_tracker.camera_tracker_main's own comment on this
+        # same pattern -- a separate OS process, independent basicConfig call.
+        logging.basicConfig(level=logging.DEBUG if self.verbose else logging.INFO)
         frame_manager = SharedMemoryFrameManager()
 
         # Bridge multiprocessing.Value counters used for cross-process stats reporting to

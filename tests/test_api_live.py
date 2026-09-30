@@ -5,8 +5,6 @@ Mirrors tests/test_go2rtc_integration.py's approach, but exercises the proxy lay
 
 from __future__ import annotations
 
-import os
-import signal
 import socket
 import subprocess as sp
 import tempfile
@@ -26,7 +24,9 @@ from mirage.config.schema import (
     MirageConfig,
     ModelConfig,
 )
+from mirage.go2rtc.config import SUB_STREAM_SUFFIX
 from mirage.go2rtc.process import Go2rtcProcess
+from tests.conftest import kill_process_group
 
 STREAM_PORT = 19520
 API_LIVE_TEST_PORT = 19594
@@ -38,17 +38,6 @@ def _port_open(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(0.5)
         return s.connect_ex(("127.0.0.1", port)) == 0
-
-
-def _kill_process_group(proc: sp.Popen) -> None:
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    try:
-        proc.wait(timeout=5)
-    except sp.TimeoutExpired:
-        pass
 
 
 @pytest.fixture
@@ -72,13 +61,12 @@ def video_server():
             pytest.fail("video test server exited before listening")
         time.sleep(0.1)
     else:
-        _kill_process_group(proc)
+        kill_process_group(proc)
         pytest.fail("video test server never started listening")
 
     yield f"tcp://127.0.0.1:{STREAM_PORT}"
 
-    _kill_process_group(proc)
-    sp.run(["pkill", "-9", "-f", str(STREAM_PORT)], stdout=sp.DEVNULL, stderr=sp.DEVNULL)
+    kill_process_group(proc)
 
 
 @pytest.fixture
@@ -134,6 +122,19 @@ def test_snapshot_proxy_returns_real_jpeg(client):
 def test_snapshot_proxy_unknown_camera_returns_404(client):
     resp = client.get("/api/live/nonexistent_camera/snapshot.jpg")
     assert resp.status_code == 404
+
+
+def test_snapshot_proxy_accepts_sub_suffixed_stream_name(client):
+    # "<camera>_sub" (the low-res grid-tier go2rtc stream, see
+    # mirage.go2rtc.config.build_go2rtc_config) must pass this endpoint's camera
+    # validation -- it should never 404 here just for carrying the suffix. This fixture's
+    # source is a non-rtsp:// test stream, so go2rtc itself never actually registers a
+    # "<camera>_sub" stream for it (see build_go2rtc_config's own rtsp-only guard) -- a
+    # 502 (go2rtc has no such stream) proves our own validation let the request through
+    # and the failure is go2rtc's, not ours; a 404 would mean this proxy wrongly rejected
+    # a legitimately-shaped stream name.
+    resp = client.get(f"/api/live/{CAMERA_NAME}{SUB_STREAM_SUFFIX}/snapshot.jpg")
+    assert resp.status_code != 404
 
 
 def test_ws_proxy_relays_go2rtc_messages(client):

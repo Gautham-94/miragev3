@@ -290,6 +290,54 @@ def test_get_camera_config_by_name_for_edit_prefill(client):
     assert body["alert_labels"] == ["person"]
 
 
+def test_create_camera_with_live_sub_url_persists_and_is_readable(client):
+    resp = client.post(
+        "/api/config/cameras",
+        json={
+            "name": "front_door",
+            "rtsp_url": "rtsp://admin:pass@192.168.1.99:554/Streaming/Channels/101",
+            "live_sub_url": "rtsp://admin:pass@192.168.1.99:554/Streaming/Channels/102",
+            "detector": "general",
+        },
+    )
+    assert resp.status_code == 201
+
+    body = client.get("/api/config/cameras/front_door").json()
+    assert body["live_sub_url"] == "rtsp://admin:pass@192.168.1.99:554/Streaming/Channels/102"
+
+
+def test_create_camera_without_live_sub_url_defaults_to_none(client):
+    client.post(
+        "/api/config/cameras",
+        json={"name": "front_door", "rtsp_url": "rtsp://127.0.0.1/front_door", "detector": "general"},
+    )
+
+    body = client.get("/api/config/cameras/front_door").json()
+    assert body["live_sub_url"] is None
+
+
+def test_update_camera_blank_live_sub_url_clears_it(client):
+    # A form field left blank submits "" -- must be treated as "no override" (falls back
+    # to the ffmpeg-transcode grid tier), not a literal empty-string stream URL.
+    client.post(
+        "/api/config/cameras",
+        json={
+            "name": "front_door",
+            "rtsp_url": "rtsp://127.0.0.1/front_door",
+            "live_sub_url": "rtsp://127.0.0.1/front_door_sub",
+            "detector": "general",
+        },
+    )
+
+    client.put(
+        "/api/config/cameras/front_door",
+        json={"name": "front_door", "rtsp_url": "rtsp://127.0.0.1/front_door", "live_sub_url": "", "detector": "general"},
+    )
+
+    body = client.get("/api/config/cameras/front_door").json()
+    assert body["live_sub_url"] is None
+
+
 def test_get_camera_config_unknown_returns_404(client):
     resp = client.get("/api/config/cameras/nonexistent")
     assert resp.status_code == 404

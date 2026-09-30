@@ -49,7 +49,13 @@ def _confirmed_snapshot_boxes(tracked_objects: dict[str, TrackedObjectState]) ->
     dispatch, Review severity) for "is this a real detection, not noise." A still-
     unconfirmed object (mid initialization_delay) is deliberately excluded -- it might
     still turn out to be a false positive, so it shouldn't get boxed as if it were a
-    real confirmed detection. Rendered on demand at request time by
+    real confirmed detection. Also excludes any object whose box isn't currently "live"
+    (TrackedObjectState.is_live -- both corners matched a real detection recently, not
+    just Kalman-coasting): the object stays tracked so it doesn't flicker away during a
+    brief gap, but its box is then a motion prediction, not an observation, and can
+    visibly drift from the object's real position in this exact frame -- confirmed live
+    via real stored snapshot_boxes with inverted (x2<x1/y2<y1) coordinates, a symptom
+    of exactly this. Rendered on demand at request time by
     mirage/api/routers/events.py, via mirage.util.thumbnail.draw_boxes_on_jpeg_bytes --
     see that module's own docstring for why boxes are stored as data, not burned into
     the saved file (mirrors Frigate's own confirmed design, frigate/util/image.py).
@@ -57,7 +63,7 @@ def _confirmed_snapshot_boxes(tracked_objects: dict[str, TrackedObjectState]) ->
     return [
         {"label": state.label, "box": list(state.box)}
         for state in tracked_objects.values()
-        if not state.is_false_positive
+        if not state.is_false_positive and state.is_live
     ]
 
 

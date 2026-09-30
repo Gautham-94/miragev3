@@ -1,0 +1,233 @@
+@use '../_page-shell';
+
+.filter-bar {
+  display: flex;
+  gap: var(--space-3);
+}
+
+// --- Flat sighting list ---
+
+.sighting-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  background: var(--bg-raised);
+}
+
+.sighting-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+  transition: background-color 120ms ease;
+
+  &:last-child {
+    border-bottom: none;
+  }
+
+  &.clickable {
+    cursor: pointer;
+
+    &:hover {
+      background: var(--bg-overlay);
+    }
+  }
+}
+
+.row-thumb {
+  position: relative;
+  flex-shrink: 0;
+  width: 112px;
+  aspect-ratio: 4 / 3;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: #000;
+
+  img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+}
+
+.thumb-placeholder {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-disabled);
+  background: var(--bg-overlay);
+}
+
+.row-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.row-meta-top {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.row-label {
+  font-weight: 600;
+  font-size: var(--text-md);
+  text-transform: capitalize;
+  color: var(--text-primary);
+}
+
+.row-meta-bottom {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.row-dot {
+  color: var(--text-disabled);
+}
+
+.row-field-label {
+  color: var(--text-tertiary);
+}
+
+.row-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.row-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-overlay);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 120ms ease, background-color 120ms ease;
+
+  &:hover {
+    border-color: var(--border-strong);
+    background: var(--accent-wash);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+}
+
+.scene-btn {
+  color: var(--accent);
+}
+
+// Keeps action-column width stable while a row's scene lookup is still pending (key
+// absent from scenesByEventId) vs. resolved-to-null (no scene at all) -- otherwise
+// rows visibly reflow once each batch of lookups lands.
+.row-btn-placeholder {
+  height: 29px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.ongoing-hint {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+
+// --- Species badge (shared visual language with events-page.scss) ---
+
+.species-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  background: var(--severity-info-wash);
+  color: var(--severity-info);
+
+  &.species-complete {
+    background: var(--severity-rule-wash);
+    color: var(--severity-rule);
+  }
+
+  &.species-failed {
+    background: var(--severity-detection-wash);
+    color: var(--severity-detection);
+  }
+}
+
+// Scene severity, shown inline on the row itself (see .species-badge above for the
+// same treatment applied to species) -- no separate panel/click needed just to see it.
+.severity-chip {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  background: var(--severity-detection-wash);
+  color: var(--severity-detection);
+
+  &.severity-alert {
+    background: var(--severity-alert-wash);
+    color: var(--severity-alert);
+  }
+
+  &.severity-rule {
+    background: var(--severity-rule-wash);
+    color: var(--severity-rule);
+  }
+}
+
+.inline-error {
+  padding: var(--space-3);
+  background: var(--severity-alert-wash);
+  border: 1px solid rgba(255, 59, 59, 0.3);
+  border-radius: var(--radius-md);
+  color: var(--severity-alert);
+  font-size: var(--text-sm);
+}
+
+.clip-error-banner {
+  position: fixed;
+  bottom: var(--space-6);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 100;
+  box-shadow: var(--shadow-panel);
+}
+
+.lightbox-label {
+  text-transform: capitalize;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.lightbox-dot {
+  color: var(--text-disabled);
+}

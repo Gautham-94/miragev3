@@ -59,6 +59,11 @@ export class ManageCamerasPage implements OnInit {
       .updateCamera(camera.name, {
         name: camera.name,
         rtsp_url: camera.rtsp_url,
+        // update_camera fully replaces the stored CameraConfig from this payload (see
+        // mirage.api.routers.config.update_camera) -- omitting this would silently wipe
+        // an already-configured live_sub_url every time this enable/disable toggle
+        // is used.
+        live_sub_url: camera.live_sub_url,
         detector: camera.detector,
         track_objects: camera.track_objects,
         width: camera.width,
@@ -71,8 +76,10 @@ export class ManageCamerasPage implements OnInit {
         detection_labels: camera.detection_labels,
         enabled: nextEnabled,
         rtsp_transport: camera.rtsp_transport,
-        min_score: camera.min_score,
-        threshold: camera.threshold,
+        // filters intentionally omitted -- the backend now merges (see
+        // mirage.api.routers.config._build_camera_config), so leaving it out keeps
+        // every label's existing filter untouched, unlike the old shared-value design
+        // this used to have to round-trip explicitly to avoid wiping.
       })
       .subscribe({
         next: () => {

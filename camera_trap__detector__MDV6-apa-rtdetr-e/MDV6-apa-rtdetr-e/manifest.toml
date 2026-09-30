@@ -1,0 +1,41 @@
+[model]
+id = "MDV6-apa-rtdetr-e"
+format = "onnx"
+file = "1/model.onnx"
+domain = "camera_trap"
+task = "detector"
+family = ["MegaDetector"]
+version = "v6"
+status = "active"
+license = "Apache-2.0"
+commercial_use = true
+species_direct = false
+detector_gate_class = "animal"
+geo_scope = "global"
+geo_regions = []
+reference = "MegaDetector V6 Apache RT-DETR variant, Microsoft AI for Good Lab (AI4G); https://raw.githubusercontent.com/microsoft/MegaDetector/main/docs/model_zoo.md; weights DOI: https://doi.org/10.5281/zenodo.15398270"
+
+[preprocessing]
+method = "resize"
+input_size = [640, 640]
+layout = "nchw"
+normalization = "unit"
+interpolation = "cv2_bilinear"
+
+[inference]
+strategy = "single"
+
+[inference.trt]
+mode = "on_demand"
+
+[postprocessing]
+method = "rtdetr_topk"
+confidence_threshold = 0.2
+
+[labels]
+file = "labels.txt"
+format = "name_index_csv"
+
+[provenance]
+developer = "Microsoft AI for Good Lab (AI4G)"
+ai4g_relationship = "first_party"

@@ -52,5 +52,15 @@ def box_to_points(box: tuple[float, float, float, float]) -> np.ndarray:
 
 
 def points_to_box(points: np.ndarray) -> tuple[float, float, float, float]:
+    """norfair's Kalman filter tracks each corner point independently (see
+    box_to_points) with no constraint that the "top-left" point stays left-of/above the
+    "bottom-right" one -- under jitter or coasting (no real detection for a frame or
+    two) the two corners can drift and cross each other, producing an inverted box
+    (x2 < x1 and/or y2 < y1). Confirmed live: real stored Event.snapshot_boxes with
+    negative widths/heights. Sorting here guarantees every box this tracker ever
+    returns is geometrically valid, regardless of how the underlying points drifted.
+    """
     (x1, y1), (x2, y2) = points
-    return float(x1), float(y1), float(x2), float(y2)
+    x1, x2 = sorted((float(x1), float(x2)))
+    y1, y2 = sorted((float(y1), float(y2)))
+    return x1, y1, x2, y2

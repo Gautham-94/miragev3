@@ -1,6 +1,6 @@
 import { HttpClient, HttpParams } from '@angular/common/http';
 import { Injectable, inject } from '@angular/core';
-import { Observable } from 'rxjs';
+import { Observable, of } from 'rxjs';
 
 import { environment } from '../../../environments/environment';
 import {
@@ -16,10 +16,12 @@ import {
   LogEntry,
   OnvifDevice,
   OnvifResolveResult,
+  HwaccelConfig,
   Recording,
   RecordingListParams,
   ReviewListParams,
   ReviewSegment,
+  SpeciesConfig,
   SystemCapabilities,
   SystemStatus,
 } from '../models/api.models';
@@ -99,6 +101,16 @@ export class ApiService {
     return `${this.base}/api/review/${encodeURIComponent(id)}/clip`;
   }
 
+  // Reverse lookup, batched: for a page of sightings on the Detections page, resolves
+  // each one's containing scene (or null) in one request instead of one per row -- see
+  // mirage/api/routers/events.py's GET /scenes docstring.
+  getScenesForEvents(ids: string[]): Observable<Record<string, ReviewSegment | null>> {
+    if (ids.length === 0) return of({});
+    return this.http.get<Record<string, ReviewSegment | null>>(`${this.base}/api/events/scenes`, {
+      params: { ids: ids.join(',') },
+    });
+  }
+
   liveSnapshotUrl(camera: string): string {
     return `${this.base}/api/live/${encodeURIComponent(camera)}/snapshot.jpg`;
   }
@@ -128,6 +140,22 @@ export class ApiService {
     return this.http.patch<Detector>(`${this.base}/api/config/detectors/${encodeURIComponent(name)}/enabled`, { enabled });
   }
 
+  getSpeciesConfig(): Observable<SpeciesConfig> {
+    return this.http.get<SpeciesConfig>(`${this.base}/api/config/species`);
+  }
+
+  setSpeciesEnabled(enabled: boolean): Observable<SpeciesConfig> {
+    return this.http.patch<SpeciesConfig>(`${this.base}/api/config/species/enabled`, { enabled });
+  }
+
+  getHwaccelConfig(): Observable<HwaccelConfig> {
+    return this.http.get<HwaccelConfig>(`${this.base}/api/config/hwaccel`);
+  }
+
+  setHwaccelEnabled(enabled: boolean): Observable<HwaccelConfig> {
+    return this.http.patch<HwaccelConfig>(`${this.base}/api/config/hwaccel/enabled`, { enabled });
+  }
+
   getLogs(params: { limit?: number; since?: number } = {}): Observable<LogEntry[]> {
     return this.http.get<LogEntry[]>(`${this.base}/api/system/logs`, { params: toHttpParams(params) });
   }
@@ -144,6 +172,14 @@ export class ApiService {
 
   listExecutionProviders(): Observable<ExecutionProvider[]> {
     return this.http.get<ExecutionProvider[]>(`${this.base}/api/config/execution-providers`);
+  }
+
+  listDetectorBackends(): Observable<string[]> {
+    return this.http.get<string[]>(`${this.base}/api/config/detector-backends`);
+  }
+
+  getDetectorLabels(name: string): Observable<string[]> {
+    return this.http.get<string[]>(`${this.base}/api/config/detectors/${encodeURIComponent(name)}/labels`);
   }
 
   listCameraConfigs(): Observable<CameraConfigDetail[]> {

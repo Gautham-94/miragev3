@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+      <defs>
+        <linearGradient id="emerald" x1="0%" y1="0%" x2="100%" y2="0%">
+          <stop offset="0%" stop-color="#19E6C1"/><stop offset="45%" stop-color="#00BFAE"/><stop offset="72%" stop-color="#52D88B"/><stop offset="100%" stop-color="#B8F36A"/>
+        </linearGradient>
+        
+      </defs>
+      <rect width="1024" height="1024" rx="220" fill="#F4FAF7"/>
+      <g>
+        <path d="M 100 515 C 165 505, 180 312, 260 312 C 360 408.76, 440 468, 515 448 C 545 404.0, 590 386.0, 610 374.0 C 825 454.0, 869 507, 924 512" fill="none" stroke="url(#emerald)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round" opacity="1.000"/><path d="M 100 540 C 165 530, 180 339, 260 339 C 360 434.12, 440 493, 515 473 C 545 430.0, 590 412.0, 610 400.0 C 825 478.75, 869 532, 924 537" fill="none" stroke="url(#emerald)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round" opacity="0.955"/><path d="M 100 565 C 165 555, 180 366, 260 366 C 360 459.48, 440 518, 515 498 C 545 456.0, 590 438.0, 610 426.0 C 825 503.5, 869 557, 924 562" fill="none" stroke="url(#emerald)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round" opacity="0.910"/><path d="M 100 590 C 165 580, 180 393, 260 393 C 360 484.84, 440 543, 515 523 C 545 482.0, 590 464.0, 610 452.0 C 825 528.25, 869 582, 924 587" fill="none" stroke="url(#emerald)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round" opacity="0.865"/><path d="M 100 615 C 165 605, 180 420, 260 420 C 360 510.2, 440 568, 515 548 C 545 508.0, 590 490.0, 610 478.0 C 825 553.0, 869 607, 924 612" fill="none" stroke="url(#emerald)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round" opacity="0.820"/><path d="M 100 640 C 165 630, 180 447, 260 447 C 360 535.56, 440 593, 515 573 C 545 534.0, 590 516.0, 610 504.0 C 825 577.75, 869 632, 924 637" fill="none" stroke="url(#emerald)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round" opacity="0.775"/><path d="M 100 665 C 165 655, 180 474, 260 474 C 360 560.92, 440 618, 515 598 C 545 560.0, 590 542.0, 610 530.0 C 825 602.5, 869 657, 924 662" fill="none" stroke="url(#emerald)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round" opacity="0.730"/>
+      </g>
+    </svg>

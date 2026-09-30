@@ -26,6 +26,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
 from mirage.api.schemas import CameraOut
+from mirage.const import resolve_model_path
 from mirage.config.schema import (
     CameraConfig,
     CameraInputConfig,
@@ -48,9 +49,32 @@ from mirage.config.schema import (
     TensorLayout,
 )
 from mirage.detection.execution_providers import available_execution_providers
+from mirage.detection.labelmap import load_labels
 from mirage.detection.registry import available_backends
 
 router = APIRouter(prefix="/api/config", tags=["config"])
+
+
+def _detector_labels(detector: DetectorInstanceConfig) -> list[str]:
+    """The real, distinct label names a detector's labelmap file declares -- excludes
+    load_labels()'s "unknown" prefill entries (indices the labelmap file never actually
+    assigns), so this only ever returns labels the model can genuinely emit (e.g.
+    ["animal", "person", "vehicle"] for the MegaDetector-family plugins, COCO's 80 for
+    "general"/yolov8n). Sorted for a stable, predictable UI row order regardless of the
+    labelmap file's own line order or index gaps.
+    """
+    raw = load_labels(resolve_model_path(detector.model.labelmap_path))
+    return sorted({label for label in raw.values() if label != "unknown"})
+
+
+class LabelFilterOut(BaseModel):
+    min_score: float
+    threshold: float
+
+
+class LabelFilterRequest(BaseModel):
+    min_score: float = Field(ge=0, le=1)
+    threshold: float = Field(ge=0, le=1)
 
 
 class DetectorOut(BaseModel):
@@ -75,6 +99,11 @@ class CameraWriteRequest(BaseModel):
 
     name: str = Field(min_length=1)
     rtsp_url: str = Field(min_length=1)
+    # Optional cheap, low-resolution stream URL for the live-view grid tier -- see
+    # mirage.config.schema.CameraConfig.live_sub_url's own docstring. Left unset
+    # (None), go2rtc transcodes the main stream down for the grid instead -- always
+    # works, just costs an extra ffmpeg process per camera.
+    live_sub_url: str | None = None
     detector: str
     track_objects: list[str] = Field(default_factory=lambda: ["person"])
     # See ObjectsConfig.track_all's docstring -- when True, `track_objects` above is
@@ -109,13 +138,15 @@ class CameraWriteRequest(BaseModel):
     # See ObjectFilterConfig's own docstring -- min_score gates whether a raw detection
     # is tracked at all; threshold gates whether a tracked object's median score is ever
     # promoted from false_positive to true-positive (and therefore shown in Events/
-    # Review). None (default) keeps ObjectFilterConfig's own schema defaults (0.5/0.7).
-    # Exposed per-camera, not per-detector: two cameras routed to the identical model can
-    # legitimately need different thresholds (e.g. one mounted far from the action scores
-    # lower on genuine detections than one close-up), so this is a scene-confidence
-    # tuning knob, not a property of the model itself.
-    min_score: float | None = Field(default=None, ge=0, le=1)
-    threshold: float | None = Field(default=None, ge=0, le=1)
+    # Review). Keyed per-label (e.g. "animal"/"person"/"vehicle" for the MegaDetector-
+    # family plugins -- see _detector_labels), NOT one shared value applied to every
+    # tracked label uniformly: two labels on the same camera can legitimately need very
+    # different bars (a real bug this replaces -- the single shared field used to write
+    # to whichever label happened to be track_objects[0], silently leaving every other
+    # label, including ones tracked only via track_all, stuck on the 0.5/0.7 schema
+    # default with no way to change them). A label omitted here keeps its existing
+    # filter untouched -- see _build_camera_config's merge, not a full replace.
+    filters: dict[str, LabelFilterRequest] | None = None
 
 
 class ConfigMutationResponse(BaseModel):
@@ -144,14 +175,19 @@ class CameraConfigOut(BaseModel):
     track_all: bool
     rtsp_url: str
     rtsp_transport: RtspTransport
+    live_sub_url: str | None
     retain_days: float
     segment_seconds: int
     alert_labels: list[str]
     detection_labels: list[str]
     crowd_threshold: int | None
     dwell_seconds: int | None
-    min_score: float
-    threshold: float
+    # Keyed by every label the camera's assigned detector's labelmap declares (see
+    # _detector_labels), not just whatever's in track_objects -- a label only tracked
+    # via track_all (e.g. "animal" on a camera whose track_objects lists just "person")
+    # still needs its own editable filter row. A label never explicitly customized falls
+    # back to ObjectFilterConfig()'s own schema defaults via filter_for.
+    filters: dict[str, LabelFilterOut]
 
 
 def _primary_input(cam: CameraConfig) -> CameraInputConfig | None:
@@ -172,8 +208,21 @@ def _camera_out(cam: CameraConfig) -> CameraOut:
     )
 
 
-def _camera_config_out(cam: CameraConfig) -> CameraConfigOut:
+def _camera_config_out(cam: CameraConfig, config: MirageConfig) -> CameraConfigOut:
     primary_input = _primary_input(cam)
+    detector = config.detectors.get(cam.detector)
+    # Falls back to whatever labels this camera already has customized filters for if
+    # the assigned detector is somehow missing (shouldn't happen in practice -- every
+    # camera's detector is validated to exist at write time) or its labelmap file can't
+    # be read right now, so this endpoint degrades rather than 500s.
+    try:
+        available_labels = _detector_labels(detector) if detector is not None else list(cam.objects.filters)
+    except OSError:
+        available_labels = list(cam.objects.filters)
+    filters_out = {
+        label: LabelFilterOut(min_score=cam.objects.filter_for(label).min_score, threshold=cam.objects.filter_for(label).threshold)
+        for label in available_labels
+    }
     return CameraConfigOut(
         name=cam.name,
         enabled=cam.enabled,
@@ -186,45 +235,49 @@ def _camera_config_out(cam: CameraConfig) -> CameraConfigOut:
         track_all=cam.objects.track_all,
         rtsp_url=primary_input.path if primary_input else "",
         rtsp_transport=primary_input.rtsp_transport if primary_input else RtspTransport.tcp,
+        live_sub_url=cam.live_sub_url,
         retain_days=cam.record.continuous.days,
         segment_seconds=cam.record.segment_seconds,
         alert_labels=cam.review.alerts.labels,
         detection_labels=cam.review.detections.labels,
         crowd_threshold=cam.rules.crowd_threshold,
         dwell_seconds=cam.rules.dwell_seconds,
-        # objects.filters is keyed per-label (ObjectsConfig.filter_for), not a single
-        # camera-wide value -- this form edits one shared confidence bar applied to every
-        # currently-tracked label uniformly (see _build_camera_config), so reading back
-        # any one tracked label's filter (they're always written identically by this
-        # form) reflects the same value. Untracked/never-customized labels fall back to
-        # ObjectFilterConfig()'s own schema defaults via filter_for.
-        min_score=cam.objects.filter_for(cam.objects.track[0]).min_score if cam.objects.track else ObjectFilterConfig().min_score,
-        threshold=cam.objects.filter_for(cam.objects.track[0]).threshold if cam.objects.track else ObjectFilterConfig().threshold,
+        filters=filters_out,
     )
 
 
-def _build_camera_config(req: CameraWriteRequest) -> CameraConfig:
+def _build_camera_config(req: CameraWriteRequest, existing: CameraConfig | None) -> CameraConfig:
     review_kwargs = {}
     if req.alert_labels is not None:
         review_kwargs["alerts"] = ReviewLabelConfig(labels=req.alert_labels)
     if req.detection_labels is not None:
         review_kwargs["detections"] = ReviewLabelConfig(labels=req.detection_labels)
 
-    filters_kwargs = {}
-    if req.min_score is not None:
-        filters_kwargs["min_score"] = req.min_score
-    if req.threshold is not None:
-        filters_kwargs["threshold"] = req.threshold
-    # ObjectsConfig.filters is keyed per-label (see ObjectsConfig.filter_for) -- this
-    # form edits one shared confidence bar, applied uniformly to every label this camera
-    # tracks, rather than exposing per-label overrides the wizard has no UI for.
-    shared_filter = ObjectFilterConfig(**filters_kwargs) if filters_kwargs else ObjectFilterConfig()
-    filters = {label: shared_filter for label in req.track_objects}
+    # Merge, not replace: start from whatever this camera already had (nothing, for a
+    # brand-new camera), then overlay only the labels req.filters actually names. A
+    # label this request doesn't mention keeps its existing filter untouched -- this is
+    # the fix for a real bug (confirmed live): the old shared-single-value design
+    # rebuilt ObjectsConfig.filters from scratch on every save using only
+    # track_objects[0], silently discarding any other label's customized filter
+    # (including labels only ever tracked via track_all, which aren't in track_objects
+    # at all) even when the user never touched that label's own settings.
+    filters = dict(existing.objects.filters) if existing is not None else {}
+    for label, f in (req.filters or {}).items():
+        # model_copy (not a fresh ObjectFilterConfig(...)) so a label's already-set
+        # min_area/max_area/min_ratio/max_ratio (not exposed by this form at all) survive
+        # a min_score/threshold-only edit, rather than silently resetting to schema
+        # defaults.
+        current = filters.get(label, ObjectFilterConfig())
+        filters[label] = current.model_copy(update={"min_score": f.min_score, "threshold": f.threshold})
 
     return CameraConfig(
         name=req.name,
         enabled=req.enabled,
         ffmpeg=FfmpegConfig(inputs=[CameraInputConfig(path=req.rtsp_url, rtsp_transport=req.rtsp_transport)]),
+        # Falsy-collapsed to None -- a form field left blank submits "" here, which
+        # should mean "no override" (fall back to the ffmpeg-transcode grid tier), not a
+        # literal empty-string stream URL go2rtc would fail to connect to.
+        live_sub_url=req.live_sub_url or None,
         detect=DetectConfig(width=req.width, height=req.height, fps=req.fps),
         objects=ObjectsConfig(track=req.track_objects, track_all=req.track_all, filters=filters),
         record=RecordConfig(
@@ -250,6 +303,17 @@ def list_execution_providers() -> list[str]:
     CPU (see mirage/detection/execution_providers.py).
     """
     return available_execution_providers()
+
+
+@router.get("/detector-backends", response_model=list[str])
+def list_detector_backends() -> list[str]:
+    """Every registered detector plugin's type_key (mirage/detection/registry.py's
+    available_backends(), which scans mirage/detection/plugins/ automatically) -- lets
+    the Manage Detectors form's backend dropdown stay in sync with whatever plugins
+    actually exist, rather than a hand-maintained list that silently drifts out of date
+    whenever a plugin is added (e.g. onnx_yolo_nms alongside onnx_yolov8/onnx_megadetector).
+    """
+    return available_backends()
 
 
 class DetectorWriteRequest(BaseModel):
@@ -293,9 +357,14 @@ def _validate_and_build_detector(req: DetectorWriteRequest) -> DetectorInstanceC
             status_code=422,
             detail=f"unknown detector backend {req.device!r}; available: {known_backends}",
         )
-    if not os.path.isfile(req.model_path):
+    # resolve_model_path: a bare "models/xyz.onnx"-style path (the convention every
+    # bundled model is registered under, matching MirageConfig.default()'s own seeded
+    # detector) is relative to MODEL_CACHE_DIR, not the API process's cwd -- see that
+    # function's own docstring. An absolute path (a client Browse-ing to a custom model
+    # file) passes through unchanged either way.
+    if not os.path.isfile(resolve_model_path(req.model_path)):
         raise HTTPException(status_code=422, detail=f"model_path {req.model_path!r} does not exist")
-    if not os.path.isfile(req.labelmap_path):
+    if not os.path.isfile(resolve_model_path(req.labelmap_path)):
         raise HTTPException(status_code=422, detail=f"labelmap_path {req.labelmap_path!r} does not exist")
 
     known_providers = available_execution_providers()
@@ -445,6 +514,67 @@ def delete_detector(name: str, request: Request) -> None:
     config.save_to_db()
 
 
+class SpeciesConfigOut(BaseModel):
+    enabled: bool
+
+
+class SpeciesEnabledRequest(BaseModel):
+    enabled: bool
+
+
+@router.get("/species", response_model=SpeciesConfigOut)
+def get_species_config(request: Request) -> SpeciesConfigOut:
+    """Powers the Config page's species-identification toggle -- see
+    SpeciesClassifierConfig's own docstring for why this defaults to enabled (the
+    packaged build vendors everything it needs; this is an opt-out, not an opt-in).
+    """
+    config = request.app.state.get_config()
+    return SpeciesConfigOut(enabled=config.species_classifier.enabled)
+
+
+@router.patch("/species/enabled", response_model=SpeciesConfigOut)
+def set_species_enabled(req: SpeciesEnabledRequest, request: Request) -> SpeciesConfigOut:
+    """Lightweight toggle, same shape as PATCH /detectors/{name}/enabled -- takes
+    effect on the next pipeline restart ("Apply changes"), like every other config
+    change here.
+    """
+    config = request.app.state.get_config()
+    config.species_classifier.enabled = req.enabled
+    config.save_to_db()
+    return SpeciesConfigOut(enabled=config.species_classifier.enabled)
+
+
+class HwaccelConfigOut(BaseModel):
+    enabled: bool
+
+
+class HwaccelEnabledRequest(BaseModel):
+    enabled: bool
+
+
+@router.get("/hwaccel", response_model=HwaccelConfigOut)
+def get_hwaccel_config(request: Request) -> HwaccelConfigOut:
+    """Powers the Config page's hardware decode toggle -- see
+    MirageConfig.hwaccel_enabled's own docstring for why this defaults to enabled and
+    what it actually does (fills in NVIDIA decode args for cameras that don't already
+    have their own, only when a real GPU is detected -- never forces it on a machine
+    that can't do it).
+    """
+    config = request.app.state.get_config()
+    return HwaccelConfigOut(enabled=config.hwaccel_enabled)
+
+
+@router.patch("/hwaccel/enabled", response_model=HwaccelConfigOut)
+def set_hwaccel_enabled(req: HwaccelEnabledRequest, request: Request) -> HwaccelConfigOut:
+    """Lightweight toggle, same shape as PATCH /species/enabled -- takes effect on the
+    next pipeline restart ("Apply changes"), like every other config change here.
+    """
+    config = request.app.state.get_config()
+    config.hwaccel_enabled = req.enabled
+    config.save_to_db()
+    return HwaccelConfigOut(enabled=config.hwaccel_enabled)
+
+
 @router.get("/cameras", response_model=list[CameraConfigOut])
 def list_camera_configs(request: Request) -> list[CameraConfigOut]:
     """Powers the "Manage cameras" page -- includes rtsp_url/rtsp_transport/retain_days/
@@ -452,7 +582,7 @@ def list_camera_configs(request: Request) -> list[CameraConfigOut]:
     can pre-fill from a real, complete existing config rather than starting blank.
     """
     config = request.app.state.get_config()
-    return [_camera_config_out(cam) for cam in config.cameras.values()]
+    return [_camera_config_out(cam, config) for cam in config.cameras.values()]
 
 
 @router.get("/cameras/{name}", response_model=CameraConfigOut)
@@ -461,7 +591,22 @@ def get_camera_config(name: str, request: Request) -> CameraConfigOut:
     cam = config.cameras.get(name)
     if cam is None:
         raise HTTPException(status_code=404, detail=f"unknown camera {name!r}")
-    return _camera_config_out(cam)
+    return _camera_config_out(cam, config)
+
+
+@router.get("/detectors/{name}/labels", response_model=list[str])
+def get_detector_labels(name: str, request: Request) -> list[str]:
+    """Every real label a detector's labelmap declares -- powers the per-label Min
+    score/Confirm score rows on the Add/Edit Camera form (see _detector_labels), fetched
+    fresh whenever the form's selected detector changes so switching detectors (e.g.
+    "general" -> "megadetector-e") immediately shows the right label set instead of a
+    stale one.
+    """
+    config = request.app.state.get_config()
+    detector = config.detectors.get(name)
+    if detector is None:
+        raise HTTPException(status_code=404, detail=f"unknown detector {name!r}")
+    return _detector_labels(detector)
 
 
 @router.post("/cameras", response_model=ConfigMutationResponse, status_code=201)
@@ -477,7 +622,7 @@ def create_camera(req: CameraWriteRequest, request: Request) -> ConfigMutationRe
         )
 
     try:
-        camera = _build_camera_config(req)
+        camera = _build_camera_config(req, existing=None)
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
 
@@ -502,7 +647,7 @@ def update_camera(name: str, req: CameraWriteRequest, request: Request) -> Confi
         raise HTTPException(status_code=409, detail=f"camera {req.name!r} already exists")
 
     try:
-        camera = _build_camera_config(req)
+        camera = _build_camera_config(req, existing=config.cameras[name])
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
 

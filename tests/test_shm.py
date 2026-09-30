@@ -115,6 +115,52 @@ def test_delete_then_get_returns_none():
     assert fm.get(name, (1024,)) is None
 
 
+def test_create_fails_loudly_on_a_stale_smaller_segment_still_held_open():
+    # Real-world trigger: a camera's detect resolution is increased (e.g. via the
+    # add-camera wizard) and the pipeline is restarted, but some OTHER process from
+    # before the change (an orphaned/ungracefully-killed capture or tracker process)
+    # is STILL ALIVE and still holds its handle to the old, smaller-sized segment
+    # open. On Windows, a named shared-memory mapping is reference-counted by open
+    # handles and destroyed the instant the LAST one closes -- so this scenario only
+    # reproduces with a second handle genuinely still open (fm_stale_holder below,
+    # deliberately never closed in this test): closing every handle first would let
+    # Windows tear the mapping down on its own, and the next create() would just
+    # allocate fresh at the right size, never exercising the bug at all (this is
+    # exactly what made an earlier, wrong version of this test pass even against the
+    # unfixed code -- it called close() on the stale holder before the second
+    # create(), which released Windows' only handle and silently made the "stale"
+    # segment disappear before it could ever be reused).
+    #
+    # Before this fix, create()'s `except FileExistsError` branch just reattached to
+    # the stale segment and returned `shm.buf[:size]` -- Python slicing CLAMPS rather
+    # than raising when `size` exceeds the buffer's actual length, so this silently
+    # handed back an undersized view. The bug then surfaced far away, the next time a
+    # full-size frame was written into it: `ValueError: memoryview assignment:
+    # lvalue and rvalue have different structures` in mirage/capture/capture.py's
+    # `frame_buffer[:] = data`.
+    #
+    # The fix can't silently make this case actually work -- Windows has no way to
+    # force-resize/replace a named mapping while another handle is open, full stop
+    # (unlink() is a POSIX-only concept, a complete no-op on Windows). What it CAN do,
+    # and what this test asserts, is turn "silently corrupt the next frame written"
+    # into "fail immediately and explain why," which is what actually happened live:
+    # this surfaced as a repeating ValueError crash-loop that took real investigation
+    # to trace back to leftover orphaned processes -- a clear RuntimeError naming the
+    # segment and explaining the cause would have pointed straight at the fix
+    # (stop the leftover process) instead.
+    fm_stale_holder = SharedMemoryFrameManager()
+    name = "test_stale_resize_frame0"
+    small_size = yuv_frame_size(64, 48)   # e.g. an old 640x480-class detect resolution
+    large_size = yuv_frame_size(256, 192)  # e.g. a new, larger detect resolution
+    fm_stale_holder.create(name, small_size)  # handle deliberately kept open throughout
+    try:
+        fm2 = SharedMemoryFrameManager()
+        with pytest.raises(RuntimeError, match=name):
+            fm2.create(name, large_size)
+    finally:
+        fm_stale_holder.delete(name)
+
+
 def test_cleanup_unlinks_all_created_segments():
     fm = SharedMemoryFrameManager()
     names = [f"test_cleanup_frame{i}" for i in range(5)]

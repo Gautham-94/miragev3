@@ -37,9 +37,40 @@ def test_build_go2rtc_config_registers_detect_role_stream():
     config = _minimal_config()
     payload = build_go2rtc_config(config, api_port=1984, webrtc_port=8555)
 
-    assert payload["streams"] == {"front_door": "rtsp://127.0.0.1:8554/front_door"}
+    assert payload["streams"]["front_door"] == "rtsp://127.0.0.1:8554/front_door"
     assert payload["api"]["listen"] == ":1984"
     assert payload["webrtc"]["listen"] == ":8555"
+
+
+def test_build_go2rtc_config_registers_a_low_res_sub_stream_too():
+    config = _minimal_config()
+    payload = build_go2rtc_config(config)
+
+    assert payload["streams"]["front_door_sub"] == (
+        "ffmpeg:rtsp://127.0.0.1:8554/front_door#video=h264#width=320#height=180"
+    )
+
+
+def test_build_go2rtc_config_uses_live_sub_url_directly_when_configured():
+    # A real native substream (e.g. a Hikvision Channels/102 URL) -- go2rtc should pull
+    # it directly, no ffmpeg transcode wrapper at all.
+    config = _minimal_config(live_sub_url="rtsp://127.0.0.1:8554/front_door_sub_native")
+    payload = build_go2rtc_config(config)
+
+    assert payload["streams"]["front_door_sub"] == "rtsp://127.0.0.1:8554/front_door_sub_native"
+
+
+def test_build_go2rtc_config_live_sub_url_registered_even_for_override_camera():
+    # Unlike the ffmpeg-transcode fallback, an explicit live_sub_url's own connection
+    # doesn't depend on where the main stream came from -- it should still be
+    # registered even when the main stream is a single-client override.
+    config = _minimal_config(live_sub_url="rtsp://127.0.0.1:8554/front_door_sub_native")
+    payload = build_go2rtc_config(config, stream_overrides={"front_door": "tcp://127.0.0.1:19501"})
+
+    assert payload["streams"] == {
+        "front_door": "tcp://127.0.0.1:19501",
+        "front_door_sub": "rtsp://127.0.0.1:8554/front_door_sub_native",
+    }
 
 
 def test_build_go2rtc_config_skips_disabled_cameras():
@@ -66,7 +97,7 @@ def test_build_go2rtc_config_picks_the_detect_role_input_not_record_role():
 
     payload = build_go2rtc_config(config)
 
-    assert payload["streams"] == {"front_door": "rtsp://127.0.0.1:8554/detect_stream"}
+    assert payload["streams"]["front_door"] == "rtsp://127.0.0.1:8554/detect_stream"
 
 
 def test_build_go2rtc_config_stream_override_replaces_detect_role_source():
@@ -77,6 +108,9 @@ def test_build_go2rtc_config_stream_override_replaces_detect_role_source():
     config = _minimal_config()
     payload = build_go2rtc_config(config, stream_overrides={"front_door": "tcp://127.0.0.1:19501"})
 
+    # Exact equality (not just checking the "front_door" key) also proves no
+    # "front_door_sub" got registered -- an override means a single-client-only
+    # synthetic test source, which can't support the sub-stream's extra connection.
     assert payload["streams"] == {"front_door": "tcp://127.0.0.1:19501"}
 
 
@@ -98,9 +132,12 @@ def test_build_go2rtc_config_stream_override_only_applies_to_named_camera():
 
     payload = build_go2rtc_config(config, stream_overrides={"front_door": "tcp://127.0.0.1:19501"})
 
+    # front_door (overridden) gets no sub-stream; backyard (not overridden, a real
+    # rtsp:// source) does.
     assert payload["streams"] == {
         "front_door": "tcp://127.0.0.1:19501",
         "backyard": "rtsp://127.0.0.1:8554/backyard",
+        "backyard_sub": "ffmpeg:rtsp://127.0.0.1:8554/backyard#video=h264#width=320#height=180",
     }
 
 
@@ -126,14 +163,14 @@ def test_build_go2rtc_config_appends_transport_udp_fragment_when_configured():
 
     payload = build_go2rtc_config(config)
 
-    assert payload["streams"] == {"front_door": "rtsp://127.0.0.1:8554/front_door#transport=udp"}
+    assert payload["streams"]["front_door"] == "rtsp://127.0.0.1:8554/front_door#transport=udp"
 
 
 def test_build_go2rtc_config_no_transport_fragment_for_default_tcp():
     config = _minimal_config()
     payload = build_go2rtc_config(config)
 
-    assert payload["streams"] == {"front_door": "rtsp://127.0.0.1:8554/front_door"}
+    assert payload["streams"]["front_door"] == "rtsp://127.0.0.1:8554/front_door"
     assert "#" not in payload["streams"]["front_door"]
 
 
@@ -152,6 +189,10 @@ def test_build_go2rtc_config_no_transport_fragment_for_non_rtsp_source():
 
     payload = build_go2rtc_config(config)
 
+    # Exact equality also proves no "front_door_sub" got registered -- a directly
+    # configured non-rtsp:// input is exactly this codebase's single-client-only
+    # synthetic test source pattern, same as an override (see build_go2rtc_config's
+    # own docstring).
     assert payload["streams"] == {"front_door": "tcp://127.0.0.1:19501"}
 
 
@@ -164,4 +205,4 @@ def test_write_go2rtc_config_produces_valid_yaml_file():
         with open(path) as f:
             loaded = yaml.safe_load(f)
 
-        assert loaded["streams"] == {"front_door": "rtsp://127.0.0.1:8554/front_door"}
+        assert loaded["streams"]["front_door"] == "rtsp://127.0.0.1:8554/front_door"

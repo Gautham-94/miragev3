@@ -17,6 +17,7 @@ import subprocess as sp
 from mirage.config.schema import MirageConfig
 from mirage.go2rtc.config import DEFAULT_API_PORT, DEFAULT_WEBRTC_PORT, write_go2rtc_config
 from mirage.go2rtc.download import ensure_go2rtc_binary
+from mirage.util.proc import windows_no_console_flags
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,7 @@ class Go2rtcProcess:
             stderr=sp.DEVNULL,
             stdin=sp.DEVNULL,
             start_new_session=True,
+            creationflags=windows_no_console_flags(),
         )
         logger.info("go2rtc started (pid=%d), api on :%d, webrtc on :%d", self._proc.pid, self.api_port, self.webrtc_port)
 
@@ -63,6 +65,18 @@ class Go2rtcProcess:
     def stop(self, timeout: float = 10.0) -> None:
         if self._proc is None:
             return
+        if os.name == "nt":
+            self._stop_windows(timeout)
+        else:
+            self._stop_posix(timeout)
+        logger.info("go2rtc stopped")
+
+    def _stop_posix(self, timeout: float) -> None:
+        # killpg (not just killing self._proc.pid) also reaps go2rtc's OWN children --
+        # most importantly the ffmpeg transcode processes it spawns for each camera's
+        # low-res "_sub" grid-view stream (see mirage.go2rtc.config.SUB_STREAM_SUFFIX),
+        # which start_new_session=True in start() makes members of this same process
+        # group. Killing just the go2rtc PID would leave every one of those orphaned.
         try:
             os.killpg(os.getpgid(self._proc.pid), signal.SIGTERM)
         except ProcessLookupError:
@@ -78,4 +92,28 @@ class Go2rtcProcess:
                 self._proc.wait(timeout=5)
             except sp.TimeoutExpired:
                 pass
-        logger.info("go2rtc stopped")
+
+    def _stop_windows(self, timeout: float) -> None:
+        """os.killpg/os.getpgid don't exist on Windows at all (confirmed live: this
+        used to raise AttributeError -- not caught by the POSIX code's own
+        `except ProcessLookupError`, silently aborting stop() entirely) -- start()'s
+        start_new_session=True doesn't give Windows an equivalent process-group handle
+        to target either. `taskkill /T` is the pragmatic Windows equivalent: /T walks
+        the live process tree by PID at kill time and terminates every descendant,
+        which is what's actually needed here since go2rtc spawns its own ffmpeg
+        transcode children for the "_sub" grid-view streams (same reason _stop_posix
+        uses killpg over a plain terminate() -- see its own docstring). No graceful
+        SIGTERM-equivalent negotiation window on Windows either way (TerminateProcess
+        is unconditional), so there's no softer first attempt worth making before /F.
+        """
+        try:
+            sp.run(
+                ["taskkill", "/F", "/T", "/PID", str(self._proc.pid)],
+                capture_output=True, timeout=timeout,
+            )
+        except (sp.TimeoutExpired, OSError) as e:
+            logger.warning("taskkill failed for go2rtc tree (pid=%d): %s", self._proc.pid, e)
+        try:
+            self._proc.wait(timeout=5)
+        except sp.TimeoutExpired:
+            pass

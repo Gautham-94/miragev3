@@ -8,7 +8,6 @@ from __future__ import annotations
 import datetime
 import logging
 import re
-import subprocess as sp
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -16,6 +15,7 @@ from typing import Optional
 import psutil
 
 from mirage.const import CACHE_SEGMENT_FORMAT, MAX_SEGMENT_DURATION
+from mirage.util.proc import run_capturing
 
 logger = logging.getLogger(__name__)
 
@@ -115,15 +115,12 @@ def probe_duration(path: Path, ffprobe_path: str = "ffprobe") -> Optional[float]
     """Runs ffprobe to get the segment's duration in seconds. Returns None if the file is
     not a valid video (corrupt/incomplete segment, still being written, etc).
     """
-    try:
-        result = sp.run(
-            [ffprobe_path, "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
-            capture_output=True, text=True, timeout=15,
-        )
-    except (sp.TimeoutExpired, OSError):
-        return None
-    if result.returncode != 0:
+    result = run_capturing(
+        [ffprobe_path, "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+        timeout=15,
+    )
+    if result is None or result.returncode != 0:
         return None
     try:
         return float(result.stdout.strip())
@@ -150,16 +147,14 @@ def promote_segment(segment: CacheSegment, record_dir: str, ffmpeg_path: str = "
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest_path = dest_dir / f"{segment.start_time.strftime('%M.%S')}.mp4"
 
-    try:
-        result = sp.run(
-            [ffmpeg_path, "-hide_banner", "-y", "-i", str(segment.path),
-             "-c", "copy", "-movflags", "+faststart", str(dest_path)],
-            capture_output=True, text=True, timeout=60,
-        )
-    except (sp.TimeoutExpired, OSError) as e:
-        logger.error("failed to promote segment %s: %s", segment.path, e)
+    result = run_capturing(
+        [ffmpeg_path, "-hide_banner", "-y", "-i", str(segment.path),
+         "-c", "copy", "-movflags", "+faststart", str(dest_path)],
+        timeout=60,
+    )
+    if result is None:
+        logger.error("failed to promote segment %s: timed out or could not start ffmpeg", segment.path)
         return None
-
     if result.returncode != 0:
         logger.error("ffmpeg remux failed for %s: %s", segment.path, result.stderr[-500:])
         return None

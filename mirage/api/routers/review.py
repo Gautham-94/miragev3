@@ -5,10 +5,10 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 
-from mirage.api.schemas import ReviewSegmentOut
-from mirage.db.models import ReviewSegment
+from mirage.api.schemas import EventOut, ReviewSegmentOut
+from mirage.db.models import Event, ReviewSegment
 from mirage.recording.stitch import recordings_overlapping, stitch_recordings
-from mirage.util.time import utc_from_timestamp
+from mirage.util.time import utc_from_timestamp, utcnow
 
 router = APIRouter(prefix="/api/review", tags=["review"])
 
@@ -42,6 +42,41 @@ def get_review_segment(segment_id: str) -> ReviewSegmentOut:
     if seg is None:
         raise HTTPException(status_code=404, detail=f"unknown review segment {segment_id!r}")
     return ReviewSegmentOut.from_model(seg)
+
+
+@router.get("/{segment_id}/events", response_model=list[EventOut])
+def get_review_segment_events(segment_id: str) -> list[EventOut]:
+    """Every distinct Event (one per tracked object, see mirage.events.processor -- no
+    cross-object suppression there) whose own [start_time, end_time] overlaps this
+    segment's window on the same camera. Derived purely from existing data -- Events
+    and ReviewSegments are independently built from the same per-camera tracker obj_id
+    stream, so a time-range join is enough to recover "which distinct sightings made up
+    this scene" without needing any new capture/persistence work or an explicit
+    obj_id<->event_id link (ReviewSegment.data["detections"] keys are tracker obj_ids,
+    which aren't the same value as Event.id -- see mirage.events.review's own
+    PendingReviewSegment.detections vs mirage.events.processor's freshly-random
+    _event_id).
+
+    This is what backs the Detections page's per-scene sighting list -- ReviewSegment
+    itself only ever stores one frozen thumbnail from the moment the segment opened, so
+    an animal that entered the scene later has no box representation there at all; each
+    Event does have its own snapshot with its own boxes (see events.py's
+    /{event_id}/snapshot?bbox=true), which is what makes this join useful instead of
+    just reading review segment's own data.
+    """
+    seg = ReviewSegment.get_or_none(ReviewSegment.id == segment_id)
+    if seg is None:
+        raise HTTPException(status_code=404, detail=f"unknown review segment {segment_id!r}")
+
+    window_end = seg.end_time or utcnow()
+    query = (
+        Event.select()
+        .where(Event.camera == seg.camera)
+        .where(Event.start_time <= window_end)
+        .where((Event.end_time.is_null()) | (Event.end_time >= seg.start_time))
+        .order_by(Event.start_time.asc())
+    )
+    return [EventOut.from_model(e) for e in query]
 
 
 @router.get("/{segment_id}/thumbnail")

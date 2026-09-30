@@ -37,6 +37,15 @@ class TrackedObjectState:
     # True) and review segments never excluded false positives either. Carrying this
     # flag on the plain, already-cross-process TrackedObjectState instead fixes both.
     is_false_positive: bool = True
+    # Whether BOTH of this box's corners were matched to a real detection recently
+    # (norfair's own live_points signal, see ObjectTracker.update) rather than being
+    # purely Kalman-extrapolated. A non-live box is still tracked/returned (so the
+    # object doesn't flicker away during a brief detection gap) but shouldn't be drawn
+    # on a snapshot -- its position is a coasting prediction, not a real observation,
+    # and can visibly drift away from where the object actually is in that frame.
+    # Defaults to True for synthetic rule-triggered states (mirage.tracking.rules),
+    # which aren't subject to this at all.
+    is_live: bool = True
 
 
 def _new_id(frame_time: float) -> str:
@@ -93,7 +102,28 @@ class ObjectTracker:
                     continue
                 our_id = self._track_id_map.get(obj.global_id)
                 score = obj.last_detection.data.get("score", 0.0) if obj.last_detection is not None else 0.0
-                box = points_to_box(obj.estimate)
+                # Deliberately obj.last_detection's own raw points, NOT obj.estimate (the
+                # Kalman-filtered prediction). norfair tracks each corner as an
+                # independent point with no shape constraint between them -- over a
+                # coasting stretch (no real detection for a frame or two) the filter can
+                # let the two corners visibly converge toward each other, shrinking the
+                # box every frame even though nothing was actually re-observed (confirmed
+                # live: a real tracked box on park2 collapsing from 14px wide to 0.3px
+                # wide over 10 frames of coasting, well within is_live's own tolerance
+                # window). Using the last real detection's own box instead means mirage
+                # only ever draws/stores a box that some actual model inference produced,
+                # never a filtered guess -- during a brief gap the box simply holds at its
+                # last real position/shape rather than drifting. Trade-off: region
+                # selection for the NEXT frame (mirage.tracking.orchestration's
+                # confirmed_boxes) loses the Kalman estimate's small predictive "lead" on
+                # a moving object during that gap; norfair's own internal matching still
+                # uses obj.estimate as normal, this only changes what MIRAGE stores/draws.
+                box = points_to_box(obj.last_detection.points) if obj.last_detection is not None else points_to_box(obj.estimate)
+                # norfair's own per-point staleness signal (see TrackedObjectState.
+                # is_live's docstring) -- both corners must be live for the box itself
+                # to be trustworthy; if either corner hasn't been matched recently,
+                # this box is a coasting Kalman prediction, not a real observation.
+                is_live = bool(obj.live_points.all())
 
                 if our_id is None:
                     our_id = _new_id(frame_time)
@@ -103,13 +133,15 @@ class ObjectTracker:
                         max_frames=self.stationary_max_frames.get(label),
                     )
                     self._states[our_id] = TrackedObjectState(
-                        id=our_id, label=label, box=box, score=score, stationary=stationary, frame_time=frame_time
+                        id=our_id, label=label, box=box, score=score, stationary=stationary, frame_time=frame_time,
+                        is_live=is_live,
                     )
                 else:
                     state = self._states[our_id]
                     state.box = box
                     state.score = score
                     state.frame_time = frame_time
+                    state.is_live = is_live
 
                 self._states[our_id].stationary.update(box)
                 active_ids_this_frame.add(our_id)

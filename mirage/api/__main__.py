@@ -15,11 +15,17 @@ import logging
 import uvicorn
 
 from mirage.api.app import create_app
-from mirage.const import CACHE_DIR, DB_PATH
+from mirage.const import CACHE_DIR, DB_PATH, ensure_cuda_dll_directories_on_path
 from mirage.go2rtc.config import DEFAULT_API_PORT
 
 
 def main() -> None:
+    # See mirage/__main__.py's identical call for why: onnxruntime-gpu's
+    # CUDAExecutionProvider needs its DLL directories on PATH before any session that
+    # might request it is created. A no-op on non-Windows / without those wheels
+    # installed.
+    ensure_cuda_dll_directories_on_path()
+
     parser = argparse.ArgumentParser(prog="mirage.api", description="Run the mirage read API")
     parser.add_argument("--db-path", default=DB_PATH, help="SQLite database path (must match the running mirage instance)")
     parser.add_argument("--host", default="127.0.0.1")
@@ -32,6 +38,11 @@ def main() -> None:
              "/api/system/* can find its status/restart-request files",
     )
     parser.add_argument("--cors-origin", action="append", dest="cors_origins", help="allowed CORS origin (repeatable); default: allow all")
+    parser.add_argument(
+        "--static-dir", default=None,
+        help="serve the Angular production build (ng build's browser/ output dir) at / "
+             "with SPA fallback, instead of requiring a separate `ng serve`",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -43,7 +54,7 @@ def main() -> None:
     app = create_app(
         db_path=args.db_path, cors_origins=args.cors_origins,
         go2rtc_host=args.go2rtc_host, go2rtc_api_port=args.go2rtc_api_port,
-        cache_dir=args.cache_dir,
+        cache_dir=args.cache_dir, static_dir=args.static_dir,
     )
     uvicorn.run(app, host=args.host, port=args.port)
 

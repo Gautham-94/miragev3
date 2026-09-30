@@ -50,3 +50,14 @@ mirage.db-wal
 
 # Local environment overrides -- contains camera credentials, never commit.
 .env
+
+# Desktop packaging build artifacts and vendored binaries (fetched/built locally --
+# ffmpeg/go2rtc/kagglehub weights alone are several GB; see packaging/README.md).
+packaging/vendor/
+packaging/dist_speciesnet/
+packaging/build_speciesnet/
+packaging/installer_output/
+packaging/*.pid
+packaging
+packaging/
+

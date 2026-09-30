@@ -117,6 +117,90 @@
 
   <section class="section">
     <div class="section-header">
+      <h2>Species identification</h2>
+      <p>
+        When enabled, every animal or bird detection is additionally run through a species classifier to identify
+        what was actually seen (e.g. "white-tailed deer" instead of just "animal"). Runs locally -- nothing leaves
+        this machine. Enabled by default; turn it off to skip this extra step entirely.
+      </p>
+    </div>
+
+    @if (speciesLoadError()) {
+      <div class="empty-state">
+        <app-icon name="wifiOff" [size]="24" />
+        <p>{{ speciesLoadError() }}</p>
+      </div>
+    } @else if (species(); as speciesConfig) {
+      <div class="detector-row">
+        <app-icon name="search" [size]="20" />
+        <div class="detector-info">
+          <span class="detector-name">Species identification</span>
+        </div>
+        <label class="switch" [class.saving]="togglingSpecies()">
+          <input
+            type="checkbox"
+            [checked]="speciesConfig.enabled"
+            [disabled]="togglingSpecies()"
+            (change)="toggleSpecies()"
+          />
+          <span class="switch-track"><span class="switch-thumb"></span></span>
+          <span class="switch-label">{{ speciesConfig.enabled ? 'Enabled' : 'Disabled' }}</span>
+        </label>
+      </div>
+      @if (speciesToggleError()) {
+        <div class="inline-error">{{ speciesToggleError() }}</div>
+      }
+    } @else {
+      <div class="empty-state">
+        <span class="eyebrow">loading</span>
+      </div>
+    }
+  </section>
+
+  <section class="section">
+    <div class="section-header">
+      <h2>Hardware decode</h2>
+      <p>
+        When enabled and an NVIDIA GPU is detected, cameras automatically use it to decode video instead of the CPU
+        -- lower CPU usage, no visible difference otherwise. Falls back to software decode automatically on a
+        machine without a compatible GPU, so this is safe to leave on. Enabled by default.
+      </p>
+    </div>
+
+    @if (hwaccelLoadError()) {
+      <div class="empty-state">
+        <app-icon name="wifiOff" [size]="24" />
+        <p>{{ hwaccelLoadError() }}</p>
+      </div>
+    } @else if (hwaccel(); as hwaccelConfig) {
+      <div class="detector-row">
+        <app-icon name="video" [size]="20" />
+        <div class="detector-info">
+          <span class="detector-name">Hardware decode</span>
+        </div>
+        <label class="switch" [class.saving]="togglingHwaccel()">
+          <input
+            type="checkbox"
+            [checked]="hwaccelConfig.enabled"
+            [disabled]="togglingHwaccel()"
+            (change)="toggleHwaccel()"
+          />
+          <span class="switch-track"><span class="switch-thumb"></span></span>
+          <span class="switch-label">{{ hwaccelConfig.enabled ? 'Enabled' : 'Disabled' }}</span>
+        </label>
+      </div>
+      @if (hwaccelToggleError()) {
+        <div class="inline-error">{{ hwaccelToggleError() }}</div>
+      }
+    } @else {
+      <div class="empty-state">
+        <span class="eyebrow">loading</span>
+      </div>
+    }
+  </section>
+
+  <section class="section">
+    <div class="section-header">
       <h2>Pipeline</h2>
       <p>Restart the detection/recording pipeline to pick up any config changes (detector toggles, camera edits, ...).</p>
     </div>

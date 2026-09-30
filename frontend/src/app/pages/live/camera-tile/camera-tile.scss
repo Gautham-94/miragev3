@@ -4,6 +4,15 @@
   border-radius: var(--radius-lg);
   overflow: hidden;
   box-shadow: var(--shadow-panel);
+
+  // Applied by LivePage while this is the single maximized tile -- see live-page.scss's
+  // own `.camera-grid.has-maximized` for the grid-level layout half of this.
+  &.maximized {
+    .frame {
+      aspect-ratio: unset;
+      height: min(80vh, calc(100vw * 9 / 16));
+    }
+  }
 }
 
 .frame {
@@ -82,6 +91,38 @@
   border-radius: 50%;
   background: var(--severity-alert);
   box-shadow: 0 0 0 2px rgba(255, 59, 59, 0.25);
+}
+
+.maximize-btn {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: rgba(5, 7, 10, 0.72);
+  backdrop-filter: blur(4px);
+  color: var(--text-primary);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 150ms ease, background 150ms ease;
+
+  &:hover {
+    background: rgba(5, 7, 10, 0.9);
+  }
+
+  .frame:hover &,
+  &:focus-visible,
+  // Always visible while maximized -- this is now the ONLY way to exit full view, so
+  // it can't be hover-gated the way the enter-fullscreen affordance reasonably is.
+  .tile.maximized & {
+    opacity: 1;
+  }
 }
 
 .tile-footer {

@@ -1,4 +1,4 @@
-<div class="tile">
+<div class="tile" [class.maximized]="maximized()">
   <div class="frame">
     <video
       #videoEl
@@ -29,6 +29,16 @@
       <span class="live-dot"></span>
       <span class="mono">{{ mode() === 'mse' || mode() === 'webrtc' ? 'LIVE' : 'STILL' }}</span>
     </div>
+
+    <button
+      type="button"
+      class="maximize-btn"
+      [attr.aria-label]="maximized() ? 'Exit full view' : 'View full screen'"
+      [attr.title]="maximized() ? 'Exit full view' : 'View full screen'"
+      (click)="toggleMaximize.emit()"
+    >
+      <app-icon [name]="maximized() ? 'x' : 'maximize'" [size]="16" />
+    </button>
   </div>
   <div class="tile-footer">
     <span class="camera-name">{{ camera().name }}</span>

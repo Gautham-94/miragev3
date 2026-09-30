@@ -4,4 +4,17 @@
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
   gap: var(--space-5);
+
+  // While a tile is maximized, the grid collapses to just that one tile -- the others
+  // stay mounted (app-camera-tile.tile-hidden, not @if/@for-removed) rather than being
+  // torn down, so their MSE/WebRTC connections keep running in the background and
+  // closing the maximized view goes straight back to already-live tiles instead of
+  // every other camera having to reconnect from scratch.
+  &.has-maximized {
+    display: block;
+  }
+}
+
+app-camera-tile.tile-hidden {
+  display: none;
 }

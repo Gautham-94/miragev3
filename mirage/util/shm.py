@@ -148,6 +148,45 @@ class SharedMemoryFrameManager(FrameManager):
             shm = UntrackedSharedMemory(name=name, create=True, size=size)
         except FileExistsError:
             shm = UntrackedSharedMemory(name=name)
+            if shm.size < size:
+                # A stale segment from a previous run at a smaller requested size --
+                # e.g. a camera's detect resolution was increased since this segment
+                # was first created. Reusing it as-is would silently hand back an
+                # undersized view: `shm.buf[:size]` below CLAMPS to the buffer's
+                # actual (smaller) length rather than raising, so the bug doesn't
+                # surface here -- it surfaces far away, as a confusing `ValueError:
+                # memoryview assignment: lvalue and rvalue have different
+                # structures` the next time a full-size frame is written into the
+                # undersized view (mirage/capture/capture.py's
+                # `frame_buffer[:] = data`).
+                #
+                # unlink() is a POSIX-only concept -- a complete no-op on Windows
+                # (see CPython's own shared_memory.py: `if _USE_POSIX: ...`, nothing
+                # otherwise). A Windows named mapping is reference-counted by open
+                # handles instead and is only actually destroyed once the LAST one
+                # closes; there is no OS-level way to force-replace it while another
+                # handle is still open. So: close our own handle, try to recreate at
+                # the correct size (works whenever we held the last handle, which is
+                # the common case -- our own earlier ungraceful exit, or a
+                # config-reload within the same process), and if THAT still fails,
+                # some OTHER process genuinely still holds this segment open at the
+                # wrong size -- fail loudly and specifically rather than either
+                # silently corrupting data (the original bug) or letting a bare,
+                # unexplained FileExistsError escape from deep inside
+                # multiprocessing.shared_memory.
+                shm.close()
+                try:
+                    shm = UntrackedSharedMemory(name=name, create=True, size=size)
+                except FileExistsError:
+                    raise RuntimeError(
+                        f"SHM segment {name!r} exists at {shm.size} bytes but {size} "
+                        f"bytes were requested, and another process still holds it "
+                        f"open (Windows cannot resize/replace a named shared-memory "
+                        f"segment while any handle to it remains open). This usually "
+                        f"means a leftover mirage process from before a config "
+                        f"change (e.g. an increased camera resolution) is still "
+                        f"running -- find and stop it before restarting."
+                    ) from None
         self.shm_store[name] = shm
         view = shm.buf[:size]
         self._last_view[name] = view

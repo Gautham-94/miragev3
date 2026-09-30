@@ -30,6 +30,7 @@ const ICONS: Record<string, string> = {
   pause: 'M7 5h4v14H7zM13 5h4v14h-4z',
   list: 'M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01',
   power: 'M12 2v10M18.36 6.64a9 9 0 1 1-12.73 0',
+  maximize: 'M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M3 16v3a2 2 0 0 0 2 2h3',
 };
 
 @Component({

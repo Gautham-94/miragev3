@@ -23,6 +23,19 @@ from mirage.tracking.tracker import ObjectTracker, TrackedObjectState
 
 logger = logging.getLogger(__name__)
 
+# TEMP diagnostic: which label to log Gate 0/Gate 1 confidence-gating decisions for.
+# Added to investigate a reported miss (a porcupine never got boxed despite a leopard
+# elsewhere in the same frame being detected normally) -- neither gate's per-detection
+# raw score is normally persisted anywhere (confirmed: no DB column, no existing log
+# line), so there was no way to tell "model never saw it" apart from "saw it, scored it,
+# got gated out" after the fact. Narrow to one label to keep volume sane on an otherwise
+# noisy per-frame/per-region hot path. Remove once the investigation is done.
+DIAGNOSTIC_SCORE_LOGGING_LABEL = "animal"
+# Gate 1 status is checked every frame a track is still alive; logging that unthrottled
+# for a track that lingers unconfirmed for a while would flood the log. Matches the
+# cadence mirage.events.processor already uses for its own throttled Event updates.
+DIAGNOSTIC_SCORE_LOG_THROTTLE_SECONDS = 5.0
+
 # Mirage V3 PTZ hybrid scheduling: while a PTZ camera is actively moving, direct-sample
 # the whole frame to the detector at roughly this rate instead of the normal
 # motion-gated region pipeline -- see CameraOrchestrator.process_frame's ptz_moving
@@ -91,6 +104,15 @@ class CameraOrchestrator:
         # selection normally only re-scans CONFIRMED tracked-object regions plus fresh
         # motion -- this fills the gap for "recently seen, not yet confirmed" candidates.
         self._pending_candidate_boxes: list[tuple[int, int, int, int]] = []
+        # TEMP diagnostic (see DIAGNOSTIC_SCORE_LOGGING_LABEL above): obj_id -> frame_time
+        # of the last Gate 1 status log for that track, to throttle _update_lifecycles'
+        # own logging without touching ObjectLifecycle's own fields.
+        self._diagnostic_last_gate1_log: dict[str, float] = {}
+        # TEMP diagnostic: last frame_time regions/motion coverage was logged, throttled
+        # the same way -- a busy camera can have motion on nearly every frame, and this
+        # runs regardless of the animal label filter (there's no label yet at this
+        # stage), so it needs its own throttle to stay readable.
+        self._diagnostic_last_regions_log: float = float("-inf")
 
     def process_frame(self, yuv_frame: np.ndarray, frame_time: float) -> FrameResult:
         frame_shape = self.camera.frame_shape  # (height, width) of luma plane
@@ -140,14 +162,29 @@ class CameraOrchestrator:
         tracked_object_boxes = confirmed_boxes + self._pending_candidate_boxes
 
         min_region_size = min(self.remote_detector.model_config.width, self.remote_detector.model_config.height)
+        is_calibrating = self.motion_detector.is_calibrating()
         regions = build_regions(
             tracked_object_boxes=[tuple(int(v) for v in box) for box in tracked_object_boxes],
             motion_boxes=motion_boxes,
             min_region_size=min_region_size,
             frame_shape=frame_shape,
-            is_calibrating=self.motion_detector.is_calibrating(),
+            is_calibrating=is_calibrating,
             ptz_moving=False,
         )
+
+        # TEMP diagnostic -- see DIAGNOSTIC_SCORE_LOGGING_LABEL's own comment for the
+        # investigation this belongs to. Answers "was this location ever even sent to
+        # the detector at all" one layer upstream of Gate 0/Gate 1: a motion box that
+        # never produces a region (e.g. is_calibrating, or gets swallowed into an
+        # existing tracked-object region's extent) means the detector never ran on that
+        # part of the frame this frame, regardless of what it might have scored.
+        if logger.isEnabledFor(logging.DEBUG) and (motion_boxes or regions):
+            if frame_time - self._diagnostic_last_regions_log >= DIAGNOSTIC_SCORE_LOG_THROTTLE_SECONDS:
+                self._diagnostic_last_regions_log = frame_time
+                logger.debug(
+                    "%s: motion_boxes=%s tracked_object_boxes=%d regions=%s calibrating=%s",
+                    self.camera.name, motion_boxes, len(tracked_object_boxes), regions, is_calibrating,
+                )
 
         if not regions and not self._startup_scan_done:
             regions = [(0, 0, frame_shape[1], frame_shape[0])]
@@ -184,6 +221,11 @@ class CameraOrchestrator:
                 if not self.camera.objects.track_all and label not in self.camera.objects.track:
                     continue
                 if is_object_filtered(label, score, (x1, y1, x2, y2), frame_shape, filter_config):
+                    if label == DIAGNOSTIC_SCORE_LOGGING_LABEL:
+                        logger.debug(
+                            "%s: %s detection dropped at Gate 0 (score=%.3f, min_score=%.3f, box=%s, region=%s)",
+                            self.camera.name, label, score, filter_config.min_score, (x1, y1, x2, y2), region,
+                        )
                     continue
 
                 raw_detections.append(RawDetection(label=label, score=score, box=(x1, y1, x2, y2), region=region))
@@ -215,11 +257,32 @@ class CameraOrchestrator:
             lifecycle.record_score(state.score if was_detected_this_frame else None)
 
             filter_config = self.camera.objects.filter_for(state.label)
+            was_false_positive = lifecycle.is_false_positive
             lifecycle.update_false_positive_status(filter_config)
             # Carry the computed status back onto the plain state object, since
             # ObjectLifecycle itself never leaves this process (see
             # TrackedObjectState.is_false_positive's docstring).
             state.is_false_positive = lifecycle.is_false_positive
+
+            if state.label == DIAGNOSTIC_SCORE_LOGGING_LABEL:
+                if was_false_positive and not lifecycle.is_false_positive:
+                    # Gate 1 transition -- sticky, happens at most once per track, so
+                    # unconditional logging here can't flood.
+                    logger.debug(
+                        "%s: %s track %s CONFIRMED at Gate 1 (computed_score=%.3f, threshold=%.3f, frames=%d)",
+                        self.camera.name, state.label, obj_id, lifecycle.computed_score(),
+                        filter_config.threshold, len(lifecycle.score_history),
+                    )
+                elif lifecycle.is_false_positive:
+                    last_logged = self._diagnostic_last_gate1_log.get(obj_id, float("-inf"))
+                    if frame_time - last_logged >= DIAGNOSTIC_SCORE_LOG_THROTTLE_SECONDS:
+                        self._diagnostic_last_gate1_log[obj_id] = frame_time
+                        logger.debug(
+                            "%s: %s track %s still UNCONFIRMED at Gate 1 (computed_score=%.3f, threshold=%.3f, "
+                            "history=%s)",
+                            self.camera.name, state.label, obj_id, lifecycle.computed_score(),
+                            filter_config.threshold, list(lifecycle.score_history),
+                        )
 
         # Evict lifecycles for objects the tracker no longer reports. Object ids are
         # never reused (see tracker.py's _new_id, timestamp-based), so once a track
@@ -234,6 +297,20 @@ class CameraOrchestrator:
         # CameraTracker process, which does not restart on its own.
         for obj_id in list(self._lifecycles.keys()):
             if obj_id not in tracked:
+                evicted = self._lifecycles[obj_id]
+                if evicted.label == DIAGNOSTIC_SCORE_LOGGING_LABEL and evicted.is_false_positive:
+                    # This track disappeared having NEVER cleared Gate 1 -- the "ghost
+                    # track" case: something real was detected and tracked for a while
+                    # (score_history below shows exactly how long/what it scored), but
+                    # never confirmed, so it never got an Event, a snapshot box, or
+                    # anything else visible.
+                    logger.debug(
+                        "%s: %s track %s EVICTED while still unconfirmed (computed_score=%.3f, "
+                        "history=%s)",
+                        self.camera.name, evicted.label, obj_id, evicted.computed_score(),
+                        list(evicted.score_history),
+                    )
+                self._diagnostic_last_gate1_log.pop(obj_id, None)
                 del self._lifecycles[obj_id]
 
     def get_lifecycle(self, obj_id: str) -> ObjectLifecycle | None:

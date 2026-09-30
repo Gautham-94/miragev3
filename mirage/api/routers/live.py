@@ -20,6 +20,8 @@ from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisco
 from fastapi.responses import Response
 from websockets.exceptions import ConnectionClosed
 
+from mirage.go2rtc.config import SUB_STREAM_SUFFIX
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/live", tags=["live"])
@@ -29,10 +31,21 @@ def _go2rtc_api_base(request: Request) -> str:
     return f"http://{request.app.state.go2rtc_host}:{request.app.state.go2rtc_api_port}"
 
 
+def _known_camera(stream_name: str, config) -> bool:
+    """`stream_name` is whatever go2rtc stream the frontend asked for -- either a real
+    camera name (main, full-res tier) or "<camera>_sub" (the low-res grid tier go2rtc
+    registers for it, see mirage.go2rtc.config.build_go2rtc_config). Both route through
+    these same two endpoints unchanged; only the go2rtc `src=` value differs, so
+    validation just needs to check the BASE camera name still exists.
+    """
+    base = stream_name.removesuffix(SUB_STREAM_SUFFIX)
+    return base in config.cameras
+
+
 @router.get("/{camera}/snapshot.jpg")
 async def get_snapshot(camera: str, request: Request) -> Response:
     config = request.app.state.get_config()
-    if camera not in config.cameras:
+    if not _known_camera(camera, config):
         raise HTTPException(status_code=404, detail=f"unknown camera {camera!r}")
 
     url = f"{_go2rtc_api_base(request)}/api/frame.jpeg"
@@ -55,7 +68,7 @@ async def live_ws_proxy(websocket: WebSocket, camera: str) -> None:
     frontend can speak go2rtc's protocol directly without knowing go2rtc's port/host.
     """
     config = websocket.app.state.get_config()
-    if camera not in config.cameras:
+    if not _known_camera(camera, config):
         await websocket.close(code=4004, reason=f"unknown camera {camera!r}")
         return
 

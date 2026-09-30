@@ -18,7 +18,8 @@ import threading
 import time
 from pathlib import Path
 
-from mirage.config.schema import MirageConfig
+from mirage.capture.hwaccel import NVIDIA_HWACCEL_ARGS, gpu_decode_available
+from mirage.config.schema import CameraRole, MirageConfig
 from mirage.const import CACHE_DIR as DEFAULT_CACHE_DIR
 from mirage.const import DB_PATH as DEFAULT_DB_PATH
 from mirage.const import RECORD_DIR as DEFAULT_RECORD_DIR
@@ -61,6 +62,7 @@ class MirageApp:
         db_path: str = DEFAULT_DB_PATH,
         enable_go2rtc: bool = True,
         go2rtc_stream_overrides: dict[str, str] | None = None,
+        verbose: bool = False,
     ) -> None:
         self.config = config
         self.cache_dir = cache_dir
@@ -68,6 +70,15 @@ class MirageApp:
         self.db_path = db_path
         self.enable_go2rtc = enable_go2rtc
         self.go2rtc_stream_overrides = go2rtc_stream_overrides
+        # -v/--verbose only ever set the MAIN process's own root logger level
+        # (mirage/__main__.py's own logging.basicConfig call) -- every child OS process
+        # this class spawns (CameraCapture, CameraTracker, DetectorProcess,
+        # SpeciesProcess) independently calls logging.basicConfig(level=logging.INFO)
+        # with no way to know verbose was requested, so any logger.debug() call
+        # anywhere in the per-camera capture/tracking/detection/species code was
+        # unconditionally dropped regardless of -v. Threaded through to each of those
+        # processes below so their own basicConfig call can honor it too.
+        self.verbose = verbose
         self.stop_event = mp.Event()
         self.frame_manager = SharedMemoryFrameManager()
 
@@ -163,10 +174,25 @@ class MirageApp:
             self.go2rtc_process.start()
 
         self._preallocate_camera_shm()
+        self._apply_hwaccel_defaults()
         self._start_detectors()
-        self._start_species_worker()
         self._start_record_process()
         self._start_cameras()
+        # Deliberately LAST, after every other GPU-consuming process has already been
+        # launched (detectors' own onnxruntime-gpu session, cameras' ffmpeg hwaccel
+        # decode) -- SpeciesNetClassifier.__init__ blocks synchronously waiting for its
+        # subprocess's own FIRST CUDA context creation (PyTorch, a separate framework
+        # from onnxruntime), which is a fragile cold-start operation. Confirmed live: it
+        # reliably crashes with a native Windows STATUS_THREADPOOL_HANDLE_EXCEPTION
+        # (0xC000070A) when that cold start collides with the detector's OWN CUDA
+        # session ALSO cold-starting at the same moment (this used to run second, right
+        # after _start_detectors(), before detectors had any chance to finish loading);
+        # constructing the exact same classifier against an already-warm pipeline
+        # succeeds cleanly every time. Multiple CUDA processes sharing one GPU is
+        # completely normal and unproblematic once established -- this is specifically
+        # a startup-ordering race at the concurrent-cold-start moment, not a hardware
+        # limitation on running two models at once.
+        self._start_species_worker()
 
         self.result_consumer_thread = threading.Thread(target=self._result_consumer_loop, daemon=True, name="result-consumer")
         self.result_consumer_thread.start()
@@ -204,6 +230,29 @@ class MirageApp:
             from mirage.const import OUTPUT_SHM_SIZE
 
             self.frame_manager.create(detector_output_shm_name(camera.name), OUTPUT_SHM_SIZE)
+
+    def _apply_hwaccel_defaults(self) -> None:
+        """Fills in NVIDIA hardware-decode args for every camera's detect-role ffmpeg
+        input that doesn't already have its own explicit hwaccel_args -- see
+        MirageConfig.hwaccel_enabled's own docstring. Mutates self.config in place
+        (never written back to the DB, same as any other in-memory-only pipeline-start
+        computation) so this re-evaluates fresh on every restart rather than baking a
+        stale "GPU was present last time" decision into stored config.
+
+        Runs once here, before _start_cameras() builds any ffmpeg command from these
+        inputs -- gpu_decode_available() itself is cheap (a static provider-list check,
+        no subprocess), but there's no reason to repeat it once per camera either.
+        """
+        if not self.config.hwaccel_enabled:
+            return
+        if not gpu_decode_available():
+            logger.info("hwaccel: enabled but no NVIDIA GPU detected, cameras will use software decode")
+            return
+
+        for camera in self.config.cameras.values():
+            for ffmpeg_input in camera.ffmpeg.inputs:
+                if CameraRole.detect in ffmpeg_input.roles and not ffmpeg_input.hwaccel_args:
+                    ffmpeg_input.hwaccel_args = list(NVIDIA_HWACCEL_ARGS)
 
     def _start_detectors(self) -> None:
         cameras_by_detector: dict[str, list[str]] = {}
@@ -246,6 +295,7 @@ class MirageApp:
                 process = DetectorProcess(
                     detector_config=detector_config, detection_queue=queue, camera_names=camera_names,
                     detector_pub_addr=self.detector_pub_addr, stop_event=self.stop_event,
+                    verbose=self.verbose,
                 )
                 process.start()
                 self.detector_processes[worker_key] = process
@@ -274,6 +324,7 @@ class MirageApp:
         self.species_process = SpeciesProcess(
             request_queue=self.species_request_queue, result_queue=self.species_result_queue,
             stop_event=self.stop_event, classifier_config=species_config,
+            verbose=self.verbose,
         )
         self.species_process.start()
         self.species_dispatcher = SpeciesDispatcher(
@@ -317,7 +368,7 @@ class MirageApp:
             camera=camera, cache_dir=self.cache_dir, ring_depth=self.camera_ring_depths[camera.name],
             frame_queue=frame_queue, current_frame_ts=current_frame_ts,
             camera_fps_value=camera_fps_value, skipped_fps_value=skipped_fps_value,
-            stop_event=self.stop_event,
+            stop_event=self.stop_event, verbose=self.verbose,
         )
         capture.start()
         self.capture_processes[camera.name] = capture
@@ -328,7 +379,7 @@ class MirageApp:
             detection_queue=self.detection_queues[camera.detector],
             detector_sub_addr=self.detector_sub_addr, frame_queue=frame_queue,
             detected_frames_queue=self.detected_frames_queue, stop_event=self.stop_event,
-            activity_log_queue=self.activity_log_queue,
+            activity_log_queue=self.activity_log_queue, verbose=self.verbose,
         )
         tracker.start()
         self.tracker_processes[camera.name] = tracker
@@ -372,6 +423,7 @@ class MirageApp:
                 return DetectorProcess(
                     detector_config=dc, detection_queue=dq, camera_names=cn,
                     detector_pub_addr=self.detector_pub_addr, stop_event=self.stop_event,
+                    verbose=self.verbose,
                 )
 
             self.watchdog.register(f"detector:{worker_key}", process, factory, self._on_detector_restarted(worker_key))

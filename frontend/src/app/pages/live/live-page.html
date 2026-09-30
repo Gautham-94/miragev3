@@ -23,9 +23,14 @@
       <p>Every configured camera is currently disabled. Enable one on the Manage Cameras page to see it here.</p>
     </div>
   } @else {
-    <div class="camera-grid">
+    <div class="camera-grid" [class.has-maximized]="maximizedCamera() !== null">
       @for (camera of liveCameras(); track camera.name) {
-        <app-camera-tile [camera]="camera" />
+        <app-camera-tile
+          [camera]="camera"
+          [maximized]="camera.name === maximizedCamera()"
+          [class.tile-hidden]="maximizedCamera() !== null && camera.name !== maximizedCamera()"
+          (toggleMaximize)="toggleMaximized(camera.name)"
+        />
       }
     </div>
   }

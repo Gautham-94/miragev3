@@ -6,8 +6,8 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
 
-from mirage.api.schemas import EventOut
-from mirage.db.models import Event
+from mirage.api.schemas import EventOut, ReviewSegmentOut
+from mirage.db.models import Event, ReviewSegment
 from mirage.recording.stitch import recordings_overlapping, stitch_recordings
 from mirage.util.thumbnail import draw_boxes_on_jpeg_bytes
 from mirage.util.time import utc_from_timestamp
@@ -54,6 +54,61 @@ def list_events(
 
     query = query.order_by(Event.start_time.desc()).limit(limit).offset(offset)
     return [EventOut.from_model(e) for e in query]
+
+
+@router.get("/scenes", response_model=dict[str, ReviewSegmentOut | None])
+def get_scenes_for_events(
+    ids: str = Query(..., description="comma-separated event ids"),
+) -> dict[str, ReviewSegmentOut | None]:
+    """Reverse of mirage.api.routers.review's GET /{segment_id}/events -- given a batch
+    of event ids (one page of the Detections page's flat sighting list), resolves each
+    one's containing ReviewSegment (or null if it never qualified for review at all,
+    e.g. its label isn't in review.alerts.labels/review.detections.labels -- see
+    mirage.events.review.classify_severity), in ONE extra query rather than one per row.
+
+    Registered ABOVE /{event_id} deliberately -- FastAPI/Starlette matches routes in
+    registration order, so /scenes must come first or it'd be swallowed as
+    event_id="scenes".
+
+    Each event resolves to at most one segment in practice: ReviewSegmentMaintainer
+    only ever has one OPEN segment per camera at a time (mirage/events/review.py's
+    PendingReviewSegment._pending, keyed by camera name only), so segments never
+    overlap in time for the same camera. `next(...)` below just takes the first
+    (only) match rather than assuming that invariant blindly.
+    """
+    event_ids = [i for i in ids.split(",") if i]
+    if not event_ids:
+        return {}
+    events = list(Event.select().where(Event.id.in_(event_ids)))
+    if not events:
+        return {}
+
+    cameras = {e.camera for e in events}
+    min_start = min(e.start_time for e in events)
+    max_end = max((e.end_time or e.start_time) for e in events)
+
+    segments = list(
+        ReviewSegment.select()
+        .where(ReviewSegment.camera.in_(cameras))
+        .where(ReviewSegment.start_time <= max_end)
+        .where((ReviewSegment.end_time.is_null()) | (ReviewSegment.end_time >= min_start))
+    )
+
+    result: dict[str, ReviewSegmentOut | None] = {}
+    for event in events:
+        window_end = event.end_time or event.start_time
+        match = next(
+            (
+                seg
+                for seg in segments
+                if seg.camera == event.camera
+                and seg.start_time <= window_end
+                and (seg.end_time is None or seg.end_time >= event.start_time)
+            ),
+            None,
+        )
+        result[event.id] = ReviewSegmentOut.from_model(match) if match else None
+    return result
 
 
 @router.get("/{event_id}", response_model=EventOut)

@@ -33,6 +33,8 @@ export class ManageDetectorsPage implements OnInit {
   protected readonly height = signal(320);
   protected readonly executionProvider = signal<ExecutionProvider>('cpu');
   protected readonly availableProviders = signal<ExecutionProvider[]>(['cpu']);
+  protected readonly backend = signal<string>('onnx_yolov8');
+  protected readonly availableBackends = signal<string[]>(['onnx_yolov8']);
 
   protected readonly saving = signal(false);
   protected readonly saveError = signal<string | null>(null);
@@ -55,6 +57,12 @@ export class ManageDetectorsPage implements OnInit {
       next: (providers) => this.availableProviders.set(providers),
       // Non-fatal: the form still works with just the always-safe 'cpu' default if this
       // call fails for some reason (e.g. API briefly unreachable).
+      error: () => {},
+    });
+    this.api.listDetectorBackends().subscribe({
+      next: (backends) => this.availableBackends.set(backends),
+      // Non-fatal: the form still works with just the always-safe 'onnx_yolov8' default
+      // if this call fails for some reason (e.g. API briefly unreachable).
       error: () => {},
     });
   }
@@ -92,6 +100,7 @@ export class ManageDetectorsPage implements OnInit {
     this.width.set(detector.model_width);
     this.height.set(detector.model_height);
     this.executionProvider.set(detector.execution_provider);
+    this.backend.set(detector.device);
     this.showAddForm.set(true);
     this.justAdded.set(false);
     this.saveError.set(null);
@@ -106,6 +115,7 @@ export class ManageDetectorsPage implements OnInit {
     this.width.set(320);
     this.height.set(320);
     this.executionProvider.set('cpu');
+    this.backend.set('onnx_yolov8');
     this.saveError.set(null);
   }
 
@@ -121,6 +131,7 @@ export class ManageDetectorsPage implements OnInit {
       width: this.width(),
       height: this.height(),
       execution_provider: this.executionProvider(),
+      device: this.backend(),
     };
     const editingName = this.editingDetectorName();
     const request = editingName ? this.api.updateDetector(editingName, payload) : this.api.createDetector(payload);

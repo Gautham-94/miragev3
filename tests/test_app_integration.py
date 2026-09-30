@@ -6,7 +6,6 @@ Recordings rows, and shuts down cleanly with no leaked processes or shared memor
 
 from __future__ import annotations
 
-import os
 import shutil
 import socket
 import subprocess as sp
@@ -32,6 +31,7 @@ from mirage.config.schema import (
     RetainConfig,
 )
 from mirage.db.models import Event, Recordings
+from tests.conftest import kill_process_group
 
 MODEL_PATH = Path(__file__).resolve().parent.parent / "models" / "yolov8n.onnx"
 LABELMAP_PATH = Path(__file__).resolve().parent.parent / "models" / "coco_labelmap.txt"
@@ -62,19 +62,6 @@ def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
-
-
-def _kill_process_group(proc: sp.Popen) -> None:
-    import signal
-
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    try:
-        proc.wait(timeout=5)
-    except sp.TimeoutExpired:
-        pass
 
 
 @pytest.fixture
@@ -112,13 +99,12 @@ def video_server():
             pytest.fail("video test server exited before listening")
         time.sleep(0.1)
     else:
-        _kill_process_group(proc)
+        kill_process_group(proc)
         pytest.fail("video test server never started listening")
 
     yield stream_url
 
-    _kill_process_group(proc)
-    sp.run(["pkill", "-9", "-f", str(stream_port)], stdout=sp.DEVNULL, stderr=sp.DEVNULL)
+    kill_process_group(proc)
 
 
 @pytest.fixture

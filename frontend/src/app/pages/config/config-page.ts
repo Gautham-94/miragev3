@@ -3,7 +3,7 @@ import { Component, OnInit, computed, signal } from '@angular/core';
 import { RouterLink } from '@angular/router';
 
 import { ApiService } from '../../core/services/api.service';
-import { Detector, SystemCapabilities } from '../../core/models/api.models';
+import { Detector, HwaccelConfig, SpeciesConfig, SystemCapabilities } from '../../core/models/api.models';
 import { Icon } from '../../shared/icon/icon';
 
 @Component({
@@ -30,6 +30,16 @@ export class ConfigPage implements OnInit {
 
   protected readonly capabilities = signal<SystemCapabilities | null>(null);
 
+  protected readonly species = signal<SpeciesConfig | null>(null);
+  protected readonly speciesLoadError = signal<string | null>(null);
+  protected readonly togglingSpecies = signal(false);
+  protected readonly speciesToggleError = signal<string | null>(null);
+
+  protected readonly hwaccel = signal<HwaccelConfig | null>(null);
+  protected readonly hwaccelLoadError = signal<string | null>(null);
+  protected readonly togglingHwaccel = signal(false);
+  protected readonly hwaccelToggleError = signal<string | null>(null);
+
   // How many detector worker processes are already accounted for by OTHER enabled
   // detectors' num_workers -- used to warn if the total starts exceeding CPU core
   // count, since every worker process (this detector's or another's) competes for the
@@ -52,6 +62,14 @@ export class ConfigPage implements OnInit {
       // Non-fatal: the worker-count controls still work without capability guidance,
       // they just won't show the "you have N cores" note.
       error: () => {},
+    });
+    this.api.getSpeciesConfig().subscribe({
+      next: (cfg) => this.species.set(cfg),
+      error: (err) => this.speciesLoadError.set(err?.error?.detail ?? 'Could not load species identification setting.'),
+    });
+    this.api.getHwaccelConfig().subscribe({
+      next: (cfg) => this.hwaccel.set(cfg),
+      error: (err) => this.hwaccelLoadError.set(err?.error?.detail ?? 'Could not load hardware decode setting.'),
     });
   }
 
@@ -99,6 +117,44 @@ export class ConfigPage implements OnInit {
       error: (err) => {
         this.changingWorkersName.set(null);
         this.workersError.set(err?.error?.detail ?? `Could not change worker count for ${detector.name}.`);
+      },
+    });
+  }
+
+  protected toggleSpecies(): void {
+    const current = this.species();
+    if (current === null || this.togglingSpecies()) return;
+
+    this.togglingSpecies.set(true);
+    this.speciesToggleError.set(null);
+    const nextEnabled = !current.enabled;
+    this.api.setSpeciesEnabled(nextEnabled).subscribe({
+      next: (updated) => {
+        this.togglingSpecies.set(false);
+        this.species.set(updated);
+      },
+      error: (err) => {
+        this.togglingSpecies.set(false);
+        this.speciesToggleError.set(err?.error?.detail ?? `Could not ${nextEnabled ? 'enable' : 'disable'} species identification.`);
+      },
+    });
+  }
+
+  protected toggleHwaccel(): void {
+    const current = this.hwaccel();
+    if (current === null || this.togglingHwaccel()) return;
+
+    this.togglingHwaccel.set(true);
+    this.hwaccelToggleError.set(null);
+    const nextEnabled = !current.enabled;
+    this.api.setHwaccelEnabled(nextEnabled).subscribe({
+      next: (updated) => {
+        this.togglingHwaccel.set(false);
+        this.hwaccel.set(updated);
+      },
+      error: (err) => {
+        this.togglingHwaccel.set(false);
+        this.hwaccelToggleError.set(err?.error?.detail ?? `Could not ${nextEnabled ? 'enable' : 'disable'} hardware decode.`);
       },
     });
   }

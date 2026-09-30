@@ -72,6 +72,17 @@
         </div>
       </div>
       <div class="field">
+        <span>Backend</span>
+        <div class="select-wrap">
+          <select [ngModel]="backend()" (ngModelChange)="backend.set($event)" name="backend">
+            @for (b of availableBackends(); track b) {
+              <option [value]="b">{{ b }}</option>
+            }
+          </select>
+          <app-icon name="chevronDown" [size]="14" />
+        </div>
+      </div>
+      <div class="field">
         <span>Acceleration</span>
         <div class="select-wrap">
           <select [ngModel]="executionProvider()" (ngModelChange)="executionProvider.set($event)" name="executionProvider">
@@ -84,8 +95,10 @@
       </div>
       <p class="hint">
         The model file must already exist on disk at this path (relative paths resolve from wherever
-        <code>python -m mirage</code> runs). Currently only YOLOv8-architecture ONNX models are supported.
-        Acceleration options are limited to what's actually available on this machine.
+        <code>python -m mirage</code> runs). Backend must match the ONNX export format the model file actually
+        uses (mismatched output shapes silently produce garbage detections, not an error) -- see each plugin's
+        own file under <code>mirage/detection/plugins/</code> for what it expects. Acceleration options are
+        limited to what's actually available on this machine.
       </p>
 
       @if (saveError()) {

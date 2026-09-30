@@ -26,6 +26,7 @@ import numpy as np
 import onnxruntime as ort
 
 from mirage.config.schema import ModelConfig
+from mirage.const import resolve_model_path
 from mirage.detection.api import DetectionApi, empty_detection_output
 from mirage.detection.execution_providers import resolve_providers
 from mirage.detection.postprocess import nms_xywh, pack_detections
@@ -43,7 +44,7 @@ class OnnxMegadetectorDetector(DetectionApi):
         self.score_threshold = score_threshold
         self.nms_threshold = nms_threshold
         providers = resolve_providers(model_config.execution_provider)
-        self.session = ort.InferenceSession(model_config.model_path, providers=providers)
+        self.session = ort.InferenceSession(resolve_model_path(model_config.model_path), providers=providers)
         self.input_name = self.session.get_inputs()[0].name
 
     def detect_raw(self, tensor_input: np.ndarray) -> np.ndarray:

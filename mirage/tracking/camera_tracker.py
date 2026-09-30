@@ -15,7 +15,7 @@ import queue as queue_module
 import cv2
 
 from mirage.config.schema import CameraConfig, DetectorInstanceConfig
-from mirage.const import PROCESS_PRIORITY_HIGH
+from mirage.const import PROCESS_PRIORITY_HIGH, resolve_model_path
 from mirage.detection.labelmap import load_labels
 from mirage.detection.remote import RemoteObjectDetector
 from mirage.detection.tensor import yuv420_to_bgr
@@ -87,6 +87,7 @@ def camera_tracker_main(
     detected_frames_queue,
     stop_event,
     activity_log_queue=None,
+    verbose: bool = False,
 ) -> None:
     """Runs as the per-camera tracker OS process. Pulls (frame_name, frame_time) off
     frame_queue (populated by the CameraCapture process, see mirage.capture.capture),
@@ -99,10 +100,15 @@ def camera_tracker_main(
     except (AttributeError, PermissionError, OSError):
         pass
 
-    logging.basicConfig(level=logging.INFO)
+    # A separate OS process -- this basicConfig call is independent of whatever level
+    # mirage/__main__.py's own call configured for the main process, so -v/--verbose
+    # must be threaded all the way down through MirageApp -> CameraTracker -> here for
+    # any logger.debug() call anywhere in this process's code (motion, region
+    # selection, tracking/lifecycle, this file) to ever actually be emitted.
+    logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO)
     frame_manager = SharedMemoryFrameManager()
 
-    labels = load_labels(detector_config.model.labelmap_path)
+    labels = load_labels(resolve_model_path(detector_config.model.labelmap_path))
     remote_detector = RemoteObjectDetector(
         camera_name=camera.name,
         labelmap=labels,
@@ -193,6 +199,7 @@ class CameraTracker(mp.Process):
         detected_frames_queue,
         stop_event,
         activity_log_queue=None,
+        verbose: bool = False,
     ) -> None:
         super().__init__(name=f"tracker:{camera.name}")
         self.camera = camera
@@ -203,6 +210,7 @@ class CameraTracker(mp.Process):
         self.detected_frames_queue = detected_frames_queue
         self.stop_event = stop_event
         self.activity_log_queue = activity_log_queue
+        self.verbose = verbose
 
     def run(self) -> None:
         camera_tracker_main(
@@ -214,4 +222,5 @@ class CameraTracker(mp.Process):
             self.detected_frames_queue,
             self.stop_event,
             self.activity_log_queue,
+            self.verbose,
         )

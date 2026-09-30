@@ -19,6 +19,28 @@ from mirage.config.schema import CameraConfig, CameraRole, MirageConfig, RtspTra
 DEFAULT_API_PORT = 1984
 DEFAULT_WEBRTC_PORT = 8555
 
+# Every enabled (non-test-source) camera also gets a second, low-resolution go2rtc
+# stream registered under "<camera>_sub" -- see build_go2rtc_config's own docstring for
+# why. Frontend side: frontend/src/app/pages/live/camera-tile/camera-tile.ts picks this
+# suffix vs the bare camera name based on whether its tile is the maximized one.
+SUB_STREAM_SUFFIX = "_sub"
+SUB_STREAM_WIDTH = 320
+SUB_STREAM_HEIGHT = 180
+
+
+def _sub_stream_source(main_source: str) -> str:
+    """go2rtc's own documented ffmpeg-transcode stream-source syntax (confirmed against
+    go2rtc's wiki/source, not guessed): "ffmpeg:<input>#video=h264#width=W#height=H"
+    spins up a SEPARATE go2rtc-managed ffmpeg process that reads the same input and
+    re-encodes it down to WxH h264 before go2rtc ever sees it as a stream. Deliberately
+    left as a plain software libx264 encode (no #hardware=... flag) rather than NVENC:
+    at 320x180 the encode cost is trivial regardless, and a missing/misconfigured CUDA
+    runtime silently breaking every substream (and therefore the whole grid view) is a
+    far worse failure mode than a few extra points of CPU for cameras' worth of tiny
+    encodes -- can revisit if the CPU cost ever actually matters.
+    """
+    return f"ffmpeg:{main_source}#video=h264#width={SUB_STREAM_WIDTH}#height={SUB_STREAM_HEIGHT}"
+
 
 def _env_webrtc_candidates() -> list[str]:
     """Comma-separated `host:port` ICE candidates for go2rtc to advertise, from
@@ -73,15 +95,43 @@ def build_go2rtc_config(
     only for local/dev testing against a single-client-only synthetic TCP test source
     (see scripts/run_test_stream.sh), where mirage's capture process and go2rtc can't
     both connect to the same port at once.
+
+    Also registers a low-resolution "<camera>_sub" stream alongside every enabled
+    camera -- the live-view grid decodes this instead of the full-res stream for every
+    tile except whichever one is maximized. This is the same fix Frigate's own docs
+    land on for this exact problem: a browser showing N cameras at once is bottlenecked
+    by decode capacity (confirmed here against a real deployment -- a consumer GPU's
+    concurrent hardware-decode-session limit was reached well under 10 simultaneous
+    full-res tiles), and that capacity is spent on tiles the user probably isn't even
+    looking closely at. Two ways to get there: CameraConfig.live_sub_url, if the camera
+    has a real native substream (go2rtc pulls it directly, no transcode); otherwise a
+    software ffmpeg transcode of the main stream -- but only when the resolved main
+    source is a genuine rtsp:// URL AND wasn't replaced by an override, since a
+    single-client-only synthetic test source (see stream_overrides' own paragraph
+    above, and _detect_role_source's non-rtsp handling) can't also support this extra
+    connection, whether it got there via an override or was simply configured directly
+    as a non-RTSP camera input.
     """
     overrides = stream_overrides or {}
     streams: dict[str, str] = {}
     for camera in config.cameras.values():
         if not camera.enabled:
             continue
-        source = overrides.get(camera.name) or _detect_role_source(camera)
-        if source is not None:
-            streams[camera.name] = source
+        override = overrides.get(camera.name)
+        source = override or _detect_role_source(camera)
+        if source is None:
+            continue
+        streams[camera.name] = source
+        if camera.live_sub_url:
+            # A real, cheaper-than-transcoding substream URL is known for this camera
+            # (see CameraConfig.live_sub_url's own docstring) -- go2rtc pulls it
+            # directly, no ffmpeg transcode process needed at all. Registered
+            # unconditionally (unlike the transcode fallback below): its connection
+            # semantics are independent of whatever the MAIN stream's source turned out
+            # to be, so neither the override-skip nor the rtsp-only guard applies here.
+            streams[f"{camera.name}{SUB_STREAM_SUFFIX}"] = camera.live_sub_url
+        elif override is None and source.lower().startswith("rtsp://"):
+            streams[f"{camera.name}{SUB_STREAM_SUFFIX}"] = _sub_stream_source(source)
 
     candidates = _env_webrtc_candidates() if webrtc_candidates is None else webrtc_candidates
     webrtc_section: dict = {"listen": f":{webrtc_port}", "ice_servers": []}

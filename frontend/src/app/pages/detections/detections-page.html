@@ -1,0 +1,150 @@
+<div class="page">
+  <div class="page-header">
+    <div>
+      <h1 class="page-title">Detections</h1>
+      <p class="page-subtitle">Every distinct sighting, most recent first -- each animal its own row, even within the same scene.</p>
+    </div>
+    <div class="filter-bar">
+      <app-filter-select label="Camera" [options]="cameraOptions()" [(value)]="cameraFilter" />
+      <app-filter-select label="Label" [options]="labelOptions()" [(value)]="labelFilter" />
+      <app-filter-select label="Species" [options]="speciesOptions()" [(value)]="speciesFilter" />
+      <app-filter-select label="Range" [options]="timeRangeOptions" [(value)]="timeRangeFilter" />
+    </div>
+  </div>
+
+  @if (!loading() && filteredSightings().length === 0) {
+    <div class="empty-state">
+      <span class="eyebrow">no sightings yet</span>
+      <p>Tracked objects will appear here once detection is running.</p>
+    </div>
+  } @else {
+    <div class="sighting-list">
+      @for (sighting of filteredSightings(); track sighting.id) {
+        <div class="sighting-row" [class.clickable]="sighting.has_snapshot" (click)="openLightbox(sighting)">
+          <div class="row-thumb">
+            @if (sighting.has_snapshot) {
+              <img [src]="snapshotUrl(sighting)" [alt]="sighting.label" loading="lazy" fetchpriority="low" />
+            } @else {
+              <div class="thumb-placeholder">
+                <app-icon name="imageOff" [size]="18" />
+              </div>
+            }
+          </div>
+
+          <div class="row-meta">
+            <div class="row-meta-top">
+              <span class="row-label">{{ sighting.label }}</span>
+              @if (showsSpeciesBadge(sighting)) {
+                <span
+                  class="species-badge"
+                  [class.species-complete]="sighting.species_status === 'complete'"
+                  [class.species-failed]="sighting.species_status === 'failed'"
+                >
+                  {{ speciesBadgeText(sighting) }}
+                </span>
+              }
+              @if (sceneFor(sighting); as scene) {
+                <span class="severity-chip" [class.severity-alert]="scene.severity === 'alert'" [class.severity-rule]="scene.severity === 'rule'">
+                  {{ scene.severity }}
+                </span>
+              }
+            </div>
+            <div class="row-meta-bottom">
+              <span class="row-field"><span class="row-field-label">Camera:</span> {{ sighting.camera }}</span>
+              <span class="row-dot">&middot;</span>
+              <span class="row-field"><span class="row-field-label">Confidence:</span> <span class="mono">{{ (sighting.top_score * 100).toFixed(0) }}%</span></span>
+              <span class="row-dot">&middot;</span>
+              <span class="row-field"><span class="row-field-label">Detected at:</span> <span class="mono">{{ formatTime(sighting.start_time) }}</span></span>
+            </div>
+          </div>
+
+          <div class="row-actions">
+            <button type="button" class="row-btn" (click)="$event.stopPropagation(); playClip(sighting)">
+              <app-icon name="play" [size]="14" />
+              Clip
+            </button>
+            @if (sceneFor(sighting); as scene) {
+              @if (scene.end_time !== null) {
+                <button type="button" class="row-btn scene-btn" (click)="$event.stopPropagation(); playSceneClip(scene)">
+                  <app-icon name="play" [size]="14" />
+                  Full scene
+                </button>
+              } @else {
+                <span class="row-btn-placeholder ongoing-hint">scene ongoing</span>
+              }
+            } @else if (sceneFor(sighting) === undefined) {
+              <span class="row-btn-placeholder"></span>
+            }
+          </div>
+        </div>
+      }
+    </div>
+    @if (hasMore()) {
+      <div class="load-more-row">
+        <button type="button" class="load-more-btn" (click)="loadMore()" [disabled]="loadingMore()">
+          {{ loadingMore() ? 'Loading…' : 'Load more' }}
+        </button>
+      </div>
+    }
+  }
+
+  @if (openSighting(); as sighting) {
+    <app-lightbox [imageUrl]="snapshotUrl(sighting)" [alt]="sighting.label" (closed)="closeLightbox()">
+      <span class="lightbox-label">{{ sighting.label }}</span>
+      @if (showsSpeciesBadge(sighting)) {
+        <span class="lightbox-dot">&middot;</span>
+        <span
+          class="species-badge"
+          [class.species-complete]="sighting.species_status === 'complete'"
+          [class.species-failed]="sighting.species_status === 'failed'"
+        >
+          {{ speciesBadgeText(sighting) }}
+        </span>
+      }
+      <span class="lightbox-dot">&middot;</span>
+      <span>{{ sighting.camera }}</span>
+      <span class="lightbox-dot">&middot;</span>
+      <span class="mono">{{ (sighting.top_score * 100).toFixed(0) }}%</span>
+      <span class="lightbox-dot">&middot;</span>
+      <span class="mono">{{ formatTime(sighting.start_time) }}</span>
+    </app-lightbox>
+  }
+
+  @if (sceneClipError()) {
+    <div class="inline-error clip-error-banner">{{ sceneClipError() }}</div>
+  }
+
+  @if (playingSceneClip(); as scene) {
+    <app-video-lightbox
+      [videoUrl]="sceneClipUrl(scene)"
+      [downloadUrl]="sceneClipUrl(scene)"
+      [downloadName]="sceneClipDownloadName(scene)"
+      (closed)="closeSceneClip()"
+      (videoError)="onSceneClipError()"
+    >
+      <span class="lightbox-label">{{ scene.camera }}</span>
+      <span class="lightbox-dot">&middot;</span>
+      <span class="mono">{{ formatTime(scene.start_time) }}</span>
+    </app-video-lightbox>
+  }
+
+  @if (clipError()) {
+    <div class="inline-error clip-error-banner">{{ clipError() }}</div>
+  }
+
+  @if (playingClip(); as sighting) {
+    <app-video-lightbox
+      [videoUrl]="clipUrl(sighting)"
+      [downloadUrl]="clipUrl(sighting)"
+      [downloadName]="clipDownloadName(sighting)"
+      (closed)="closeClip()"
+      (videoError)="onClipError()"
+    >
+      <span class="lightbox-label">{{ sighting.label }}</span>
+      <span class="lightbox-dot">&middot;</span>
+      <span>{{ sighting.camera }}</span>
+      <span class="lightbox-dot">&middot;</span>
+      <span class="mono">{{ formatTime(sighting.start_time) }}</span>
+    </app-video-lightbox>
+  }
+</div>

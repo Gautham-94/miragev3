@@ -28,7 +28,7 @@
         >
           <div class="event-thumb">
             @if (event.has_snapshot) {
-              <img [src]="snapshotUrl(event)" [alt]="event.label" loading="lazy" />
+              <img [src]="snapshotUrl(event)" [alt]="event.label" loading="lazy" fetchpriority="low" />
             } @else {
               <div class="thumb-placeholder">
                 <app-icon name="imageOff" [size]="20" />

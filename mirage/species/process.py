@@ -48,13 +48,16 @@ def species_process_main(
     result_queue: "mp.Queue",
     stop_event,
     classifier_config: SpeciesClassifierConfig,
+    verbose: bool = False,
 ) -> None:
     """Runs as the single dedicated SpeciesProcess OS process. Loads the configured
     classifier backend exactly once here, regardless of how many cameras exist --
     camera tracker processes never load a species model themselves, and the main
     process only ever sends small crop-jpeg requests through request_queue.
     """
-    logging.basicConfig(level=logging.INFO)
+    # See mirage.tracking.camera_tracker.camera_tracker_main's own comment on this same
+    # pattern -- a separate OS process, independent basicConfig call.
+    logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO)
 
     from mirage.species.registry import create_classifier
 
@@ -123,12 +126,16 @@ class SpeciesProcess(mp.Process):
         result_queue: "mp.Queue",
         stop_event,
         classifier_config: SpeciesClassifierConfig,
+        verbose: bool = False,
     ) -> None:
         super().__init__(name="species")
         self.request_queue = request_queue
         self.result_queue = result_queue
         self.stop_event = stop_event
         self.classifier_config = classifier_config
+        self.verbose = verbose
 
     def run(self) -> None:
-        species_process_main(self.request_queue, self.result_queue, self.stop_event, self.classifier_config)
+        species_process_main(
+            self.request_queue, self.result_queue, self.stop_event, self.classifier_config, self.verbose,
+        )

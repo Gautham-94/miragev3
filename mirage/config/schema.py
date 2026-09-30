@@ -236,15 +236,19 @@ class SpeciesModelConfig(BaseModel):
 class SpeciesClassifierConfig(BaseModel):
     """Mirage V3: one shared species-classification worker process for every camera's
     Animal/Bird events (see mirage/species/, mirage/events/processor.py's
-    SPECIES_ENRICHABLE_LABELS). Disabled by default -- species classification never
-    runs, and every Animal/Bird Event's species_status stays "skipped", unless a user
-    explicitly opts in here. Deliberately NOT per-camera (mirrors DetectorInstanceConfig
-    being one shared thing referenced by camera.detector, not duplicated per camera) --
-    unlike detectors, there's only ever one species worker, since Person/Vehicle
-    filtering already happens at the label level, not the camera level.
+    SPECIES_ENRICHABLE_LABELS). Enabled by default -- the packaged desktop build vendors
+    everything species classification needs (the worker exe and its reference model
+    weights, see packaging/mirage_app.spec), so it works out of the box with no separate
+    setup step; exposed as a toggle on the Config page (see api/routers/config.py's
+    SpeciesConfigOut/SpeciesConfigUpdate) for a user who wants to turn it off, not as a
+    prerequisite to turn it on. Deliberately NOT per-camera (mirrors
+    DetectorInstanceConfig being one shared thing referenced by camera.detector, not
+    duplicated per camera) -- unlike detectors, there's only ever one species worker,
+    since Person/Vehicle filtering already happens at the label level, not the camera
+    level.
     """
 
-    enabled: bool = False
+    enabled: bool = True
     device: str = "speciesnet"  # backend key registered in mirage.species.registry
     model: SpeciesModelConfig = Field(default_factory=SpeciesModelConfig)
 
@@ -385,6 +389,21 @@ class CameraConfig(BaseModel):
     rules: RulesConfig = Field(default_factory=RulesConfig)
     ptz: PtzConfig = Field(default_factory=PtzConfig)
     detector: str = "default"  # which DetectorInstanceConfig this camera routes detection through
+    # A cheap, low-resolution stream URL go2rtc should use for the live-view GRID tier
+    # instead of transcoding one itself -- see mirage.go2rtc.config.build_go2rtc_config's
+    # own docstring for why the grid needs a cheap tier at all. Most IP cameras that
+    # support ONVIF/RTSP at all also expose a second, lower-res "substream" alongside
+    # their main one (e.g. Hikvision's Channels/101 vs /102) at effectively no extra
+    # cost to point go2rtc at directly, which is strictly better than mirage spinning up
+    # its own ffmpeg transcode of the main stream (one less process, no re-encode
+    # latency/quality loss, and it's exactly what the camera's own hardware already
+    # produces). None (default) falls back to that ffmpeg-transcode of the main stream --
+    # every camera still gets SOME low-res grid tier either way, this is purely an
+    # optional, cheaper upgrade when a real substream URL is known. Deliberately not
+    # validated as inputtable ffmpeg roles are (CameraInputConfig/FfmpegConfig) -- go2rtc
+    # pulls this directly and mirage's own capture/detect pipeline never touches it, so
+    # it doesn't belong to that "what does mirage's ffmpeg read" system at all.
+    live_sub_url: Optional[str] = None
 
     @property
     def frame_shape(self) -> tuple[int, int]:
@@ -417,6 +436,16 @@ class MirageConfig(BaseModel):
     detectors: dict[str, DetectorInstanceConfig] = Field(default_factory=dict)
     cameras: dict[str, CameraConfig] = Field(default_factory=dict)
     species_classifier: SpeciesClassifierConfig = Field(default_factory=SpeciesClassifierConfig)
+    # Whether MirageApp.start() should automatically add NVIDIA hardware decode args to
+    # every camera's detect-role ffmpeg input (mirage/capture/hwaccel.py's
+    # gpu_decode_available() gates this on a real NVIDIA GPU actually being present --
+    # this flag alone doesn't force hwaccel on a machine that can't do it). Enabled by
+    # default for the same reason species_classifier is -- exposed as a Config-page
+    # toggle (see api/routers/config.py's HwaccelConfigOut/HwaccelEnabledRequest) for a
+    # user who wants to turn it off, not as a prerequisite to turn it on. A camera whose
+    # own CameraInputConfig.hwaccel_args is already explicitly set is left untouched
+    # either way -- this only fills in a default for inputs that don't already have one.
+    hwaccel_enabled: bool = True
 
     @model_validator(mode="after")
     def _validate_camera_detector_refs(self) -> "MirageConfig":

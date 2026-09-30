@@ -30,6 +30,7 @@ def detector_process_main(
     detection_start,  # multiprocessing.Value("d", 0.0)
     avg_inference_speed,  # multiprocessing.Value("d", 0.0)
     stop_event,
+    verbose: bool = False,
 ) -> None:
     """Runs as the single dedicated OS process for one configured detector/accelerator.
     The model is loaded exactly ONCE here, regardless of how many cameras exist -- camera
@@ -41,7 +42,10 @@ def detector_process_main(
     except (AttributeError, PermissionError, OSError):
         pass
 
-    logging.basicConfig(level=logging.INFO)
+    # See mirage.tracking.camera_tracker.camera_tracker_main's own comment on this same
+    # pattern -- a separate OS process, independent basicConfig call, -v/--verbose must
+    # be threaded down explicitly.
+    logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO)
     frame_manager = SharedMemoryFrameManager()
     detector = create_detector(detector_config)
     publisher = Publisher(detector_pub_addr)
@@ -70,6 +74,13 @@ def detector_process_main(
             continue
 
         detection_start.value = time.time()
+        # TEMP diagnostic -- correlates the detector plugin's own near-miss candidate
+        # logging (see onnx_yolov8.py's DIAGNOSTIC_NEAR_MISS_MIN_SCORE) back to a camera
+        # name, since the plugin itself is shared across every camera routed to this
+        # detector and has no camera context of its own. Safe to correlate by simple
+        # adjacency: this loop is strictly synchronous, one detect_raw() call completes
+        # before the next iteration's queue.get() can return a different camera.
+        logger.debug("detector %s: processing camera %s", detector_config.name, camera_name)
         try:
             detections = detector.detect_raw(input_tensor)
         except Exception:
@@ -99,6 +110,7 @@ class DetectorProcess(mp.Process):
         camera_names: list[str],
         detector_pub_addr: str,
         stop_event,
+        verbose: bool = False,
     ) -> None:
         super().__init__(name=f"detector:{detector_config.name}")
         self.detector_config = detector_config
@@ -106,6 +118,7 @@ class DetectorProcess(mp.Process):
         self.camera_names = camera_names
         self.detector_pub_addr = detector_pub_addr
         self.stop_event = stop_event
+        self.verbose = verbose
         ctx = mp.get_context()
         self.detection_start = ctx.Value("d", 0.0)
         self.avg_inference_speed = ctx.Value("d", 0.01)
@@ -119,4 +132,5 @@ class DetectorProcess(mp.Process):
             self.detection_start,
             self.avg_inference_speed,
             self.stop_event,
+            self.verbose,
         )

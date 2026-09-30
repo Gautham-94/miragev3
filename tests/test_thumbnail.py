@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import cv2
 import numpy as np
@@ -39,39 +40,43 @@ def test_capture_thumbnail_fetcher_raises_returns_none_not_propagated():
         assert capture_thumbnail(failing, thumb_dir, "seg1", "cam1") is None
 
 
-def test_capture_thumbnail_retries_once_on_transient_empty_response():
+def test_capture_thumbnail_retries_on_transient_empty_response():
     # Regression test: go2rtc's frame.jpeg endpoint can return an empty body during a
-    # brief transient window (observed for real during end-to-end validation -- see
-    # IMPLEMENTATION_NOTES.md). A single retry should recover a thumbnail that only
-    # fails on the very first attempt.
+    # brief transient window -- most commonly right after a pipeline restart, before a
+    # freshly-reconnecting RTSP source has handed go2rtc its first keyframe (confirmed
+    # live: a review segment created moments after a restart got permanently stuck with
+    # thumb_path=None under the old 2-attempt/0.5s budget). A retry a few attempts in
+    # should still recover the thumbnail rather than giving up too early.
     calls = []
 
     def flaky(cam):
         calls.append(cam)
-        if len(calls) == 1:
+        if len(calls) < 4:
             return b""  # transient empty response, matching go2rtc's real behavior
         return b"\xff\xd8jpeg"
 
-    with tempfile.TemporaryDirectory() as thumb_dir:
+    with tempfile.TemporaryDirectory() as thumb_dir, patch("mirage.util.thumbnail.time.sleep"):
         result = capture_thumbnail(flaky, thumb_dir, "seg1", "cam1")
 
-        assert len(calls) == 2
+        assert len(calls) == 4
         assert result == str(Path(thumb_dir) / "seg1.jpg")
         assert Path(result).read_bytes() == b"\xff\xd8jpeg"
 
 
-def test_capture_thumbnail_gives_up_after_two_failed_attempts():
+def test_capture_thumbnail_gives_up_after_all_attempts_fail():
     calls = []
 
     def always_empty(cam):
         calls.append(cam)
         return b""
 
-    with tempfile.TemporaryDirectory() as thumb_dir:
+    with tempfile.TemporaryDirectory() as thumb_dir, patch("mirage.util.thumbnail.time.sleep") as mock_sleep:
         result = capture_thumbnail(always_empty, thumb_dir, "seg1", "cam1")
 
-        assert len(calls) == 2
+        assert len(calls) == 5
         assert result is None
+        # 4 backoff sleeps between 5 attempts, doubling from _RETRY_DELAY_SECONDS.
+        assert [c.args[0] for c in mock_sleep.call_args_list] == [0.5, 1.0, 2.0, 4.0]
 
 
 # --------------------------------------------------------------------------------------

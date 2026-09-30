@@ -19,15 +19,23 @@ import logging
 import signal
 import sys
 import time
+from pathlib import Path
 
 from mirage.app import MirageApp
 from mirage.config.schema import MirageConfig
-from mirage.const import CACHE_DIR, DB_PATH, RECORD_DIR
+from mirage.const import CACHE_DIR, DB_PATH, RECORD_DIR, ensure_cuda_dll_directories_on_path
 from mirage.db.database import close_database, init_database
 from mirage.db.models import AppConfig
+from mirage.supervisor import STOP_REQUEST_FILENAME
 
 
 def main() -> None:
+    # Before anything else: on Windows, make sure onnxruntime-gpu's CUDAExecutionProvider
+    # can actually find its CUDA/cuDNN DLLs (see mirage/const.py's own docstring on this
+    # function, and logfile.md). A no-op on non-Windows and a no-op if those pip wheels
+    # were never installed (plain CPU onnxruntime) -- safe to call unconditionally here.
+    ensure_cuda_dll_directories_on_path()
+
     parser = argparse.ArgumentParser(prog="mirage", description="Run the mirage NVR pipeline")
     parser.add_argument(
         "--config", default=None,
@@ -80,6 +88,7 @@ def main() -> None:
     app = MirageApp(
         config, cache_dir=args.cache_dir, record_dir=args.record_dir, db_path=args.db_path,
         enable_go2rtc=not args.no_go2rtc, go2rtc_stream_overrides=go2rtc_stream_overrides or None,
+        verbose=args.verbose,
     )
 
     stop_requested = False
@@ -92,10 +101,26 @@ def main() -> None:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
+    # The SIGTERM handler above is real and correct on POSIX, but on Windows a signal
+    # sent via Popen.send_signal() (how mirage.supervisor.PipelineSupervisor asks this
+    # process to stop) never actually reaches it -- see that module's own
+    # _stop_pipeline() comment for the full explanation (Popen.send_signal(SIGTERM) is
+    # implemented as an unconditional TerminateProcess() on Windows, not a real,
+    # catchable signal). stop_request_path is the other half of that module's
+    # file-based fallback: the polling loop below already wakes up twice a second
+    # regardless, so checking for this file here is a normal part of that same loop,
+    # not a separate mechanism -- a `python -m mirage` run with no supervisor simply
+    # never has anyone create this file, so this check is a harmless no-op there.
+    stop_request_path = Path(args.cache_dir) / STOP_REQUEST_FILENAME
+
     app.start()
     try:
         while not stop_requested:
             time.sleep(0.5)
+            if stop_request_path.exists():
+                logger.info("received stop request via %s, shutting down...", stop_request_path)
+                stop_request_path.unlink(missing_ok=True)
+                stop_requested = True
     finally:
         app.stop()
 

@@ -29,6 +29,7 @@ import pytest
 from mirage.capture.camera_capture import CameraCapture
 from mirage.config.schema import CameraConfig, CameraInputConfig, DetectConfig, FfmpegConfig, RecordConfig
 from mirage.util.shm import SharedMemoryFrameManager, preallocate_ring, teardown_ring, yuv_frame_shape
+from tests.conftest import kill_process_group
 
 TEST_VIDEO_DIR = Path(__file__).resolve().parent.parent / "media"
 STREAM_PORT = 19470
@@ -49,6 +50,13 @@ def tcp_stream_server():
     # RTMP -listen case -- see IMPLEMENTATION_NOTES.md). A real always-on camera accepts
     # reconnects indefinitely, so wrap the server invocation in a shell loop that keeps
     # re-listening after each client disconnects.
+    # start_new_session=True + kill_process_group (tests/conftest.py) at teardown, not
+    # just proc.terminate() -- terminate() alone only ever touches the "sh -c ..."
+    # wrapper itself, leaving its ffmpeg child orphaned and still holding the port (see
+    # kill_process_group's own docstring for the full reasoning; this fixture used to
+    # rely on a follow-up `pkill -f <port>` call to catch that child instead, which
+    # isn't available at all on Windows -- confirmed, no pkill.exe anywhere on this
+    # machine's PATH -- so it would raise instead of cleaning up).
     proc = sp.Popen(
         [
             "sh", "-c",
@@ -57,7 +65,7 @@ def tcp_stream_server():
             f"-pix_fmt yuv420p -c:v libx264 -preset ultrafast -f mpegts '{SERVER_LISTEN_URL}'; "
             f"done",
         ],
-        stdout=sp.DEVNULL, stderr=sp.DEVNULL,
+        stdout=sp.DEVNULL, stderr=sp.DEVNULL, start_new_session=True,
     )
     deadline = time.time() + 10
     while time.time() < deadline:
@@ -67,21 +75,12 @@ def tcp_stream_server():
             pytest.fail("tcp stream test server process exited before it started listening")
         time.sleep(0.1)
     else:
-        proc.terminate()
+        kill_process_group(proc)
         pytest.fail("tcp stream test server never started listening")
 
     yield STREAM_URL
 
-    proc.terminate()
-    try:
-        proc.wait(timeout=5)
-    except sp.TimeoutExpired:
-        proc.kill()
-        proc.wait(timeout=5)
-    # Match on the port number alone rather than the full URL string -- more robust
-    # against any shell quoting/escaping differences between how the process was
-    # launched (via `sh -c "..."`) and how pkill's regex matches argv.
-    sp.run(["pkill", "-f", str(STREAM_PORT)], stdout=sp.DEVNULL, stderr=sp.DEVNULL)
+    kill_process_group(proc)
 
 
 def test_camera_capture_over_real_network_stream(tcp_stream_server):

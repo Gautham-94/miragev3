@@ -14,16 +14,39 @@ must be applied here.
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import onnxruntime as ort
 
 from mirage.config.schema import ModelConfig
+from mirage.const import resolve_model_path
 from mirage.detection.api import DetectionApi, empty_detection_output
 from mirage.detection.execution_providers import resolve_providers
+from mirage.detection.labelmap import load_labels
 from mirage.detection.postprocess import nms_xywh, pack_detections
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_SCORE_THRESHOLD = 0.4
 DEFAULT_NMS_THRESHOLD = 0.4
+
+# TEMP diagnostic (see mirage.tracking.orchestration.DIAGNOSTIC_SCORE_LOGGING_LABEL --
+# same investigation, one layer deeper): score_threshold (0.4 by default) is a HARD,
+# currently-uncustomizable floor applied here, before mirage's own per-camera
+# min_score/threshold config ever sees a detection -- a candidate scoring below this
+# never reaches Gate 0/Gate 1 logging in orchestration.py, so a genuine model
+# false-negative is otherwise indistinguishable from "never ran inference near there at
+# all" after the fact. Logs the highest-scoring candidates in this near-miss band
+# (deliberately excludes near-zero background-clutter noise, which would otherwise
+# flood every single frame) so a real "the model saw SOMETHING there but scored it too
+# low" case is visible. No camera name available at this layer (this plugin is shared
+# across every camera routed to one detector) -- correlate by timestamp with the
+# adjacent "detector processing camera X" line detector_process_main now logs
+# immediately before each detect_raw() call, since that loop is strictly synchronous
+# (one call completes before the next begins). Remove once the investigation is done.
+DIAGNOSTIC_NEAR_MISS_MIN_SCORE = 0.15
+DIAGNOSTIC_NEAR_MISS_MAX_CANDIDATES = 5
 
 
 class OnnxYolov8Detector(DetectionApi):
@@ -35,8 +58,10 @@ class OnnxYolov8Detector(DetectionApi):
         self.score_threshold = score_threshold
         self.nms_threshold = nms_threshold
         providers = resolve_providers(model_config.execution_provider)
-        self.session = ort.InferenceSession(model_config.model_path, providers=providers)
+        self.session = ort.InferenceSession(resolve_model_path(model_config.model_path), providers=providers)
         self.input_name = self.session.get_inputs()[0].name
+        # TEMP diagnostic only -- see DIAGNOSTIC_NEAR_MISS_MIN_SCORE's own comment.
+        self._diagnostic_labels = load_labels(resolve_model_path(model_config.labelmap_path))
 
     def detect_raw(self, tensor_input: np.ndarray) -> np.ndarray:
         # tensor_input: [1, H, W, 3] uint8 (NHWC) -- YOLOv8 ONNX expects NCHW float32 in [0,1].
@@ -53,6 +78,9 @@ class OnnxYolov8Detector(DetectionApi):
 
         class_ids = np.argmax(class_scores, axis=1)
         scores = class_scores[np.arange(len(class_ids)), class_ids]
+
+        if logger.isEnabledFor(logging.DEBUG):
+            self._log_near_miss_candidates(class_ids, scores)
 
         keep = scores >= self.score_threshold
         if not np.any(keep):
@@ -85,3 +113,24 @@ class OnnxYolov8Detector(DetectionApi):
         boxes_xyxy_norm = np.stack([x1, y1, x2, y2], axis=1)
 
         return pack_detections(class_ids, scores, boxes_xyxy_norm)
+
+    def _log_near_miss_candidates(self, class_ids: np.ndarray, scores: np.ndarray) -> None:
+        """TEMP diagnostic -- see DIAGNOSTIC_NEAR_MISS_MIN_SCORE's own module-level
+        comment. Only ever called when DEBUG is actually enabled (see the
+        isEnabledFor guard at the call site), so this costs nothing in normal
+        operation.
+        """
+        band = (scores >= DIAGNOSTIC_NEAR_MISS_MIN_SCORE) & (scores < self.score_threshold)
+        if not np.any(band):
+            return
+        band_scores = scores[band]
+        band_labels = class_ids[band]
+        order = np.argsort(-band_scores)[:DIAGNOSTIC_NEAR_MISS_MAX_CANDIDATES]
+        candidates = ", ".join(
+            f"{self._diagnostic_labels.get(int(band_labels[i]), 'unknown')}={band_scores[i]:.3f}"
+            for i in order
+        )
+        logger.debug(
+            "near-miss sub-threshold candidates (threshold=%.3f): %s",
+            self.score_threshold, candidates,
+        )

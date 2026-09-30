@@ -29,12 +29,19 @@ GO2RTC_VERSION = "v1.9.14"
 GO2RTC_RELEASE_BASE = f"https://github.com/AlexxIT/go2rtc/releases/download/{GO2RTC_VERSION}"
 
 # (system, machine) -> (asset filename, is_zip)
+# Windows asset names confirmed directly against the v1.9.14 release's expanded asset
+# list (not guessed) -- note the naming break from the darwin/linux entries: Windows
+# uses "win64"/"win32"/"win_arm64", NOT "win_amd64". platform.machine() on 64-bit
+# Windows returns "AMD64" (lowercased here to "amd64"), never "x86_64".
 _ASSET_MAP: dict[tuple[str, str], tuple[str, bool]] = {
     ("darwin", "arm64"): ("go2rtc_mac_arm64.zip", True),
     ("darwin", "x86_64"): ("go2rtc_mac_amd64.zip", True),
     ("linux", "x86_64"): ("go2rtc_linux_amd64", False),
     ("linux", "aarch64"): ("go2rtc_linux_arm64", False),
     ("linux", "arm64"): ("go2rtc_linux_arm64", False),
+    ("windows", "amd64"): ("go2rtc_win64.zip", True),
+    ("windows", "x86"): ("go2rtc_win32.zip", True),
+    ("windows", "arm64"): ("go2rtc_win_arm64.zip", True),
 }
 
 
@@ -55,7 +62,8 @@ def _resolve_asset() -> tuple[str, bool]:
 
 
 def _binary_path(bin_dir: str) -> Path:
-    return Path(bin_dir) / "go2rtc"
+    suffix = ".exe" if platform.system().lower() == "windows" else ""
+    return Path(bin_dir) / f"go2rtc{suffix}"
 
 
 def ensure_go2rtc_binary(bin_dir: str = GO2RTC_BIN_DIR) -> str:
