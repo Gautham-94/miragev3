@@ -37,7 +37,8 @@ def test_default_config_has_general_detector_and_no_cameras():
     config = MirageConfig.default()
 
     assert "general" in config.detectors
-    assert config.detectors["general"].device == "onnx_yolov8"
+    assert config.detectors["general"].device == "onnx_rtdetr"
+    assert config.detectors["general"].model.model_path == "models/megadetector-e.onnx"
     assert config.cameras == {}
 
 

@@ -50,9 +50,6 @@ export class ConfigPage implements OnInit {
       .reduce((sum, d) => sum + d.num_workers, 0),
   );
 
-  protected readonly restarting = signal(false);
-  protected readonly restartRequested = signal(false);
-
   constructor(private readonly api: ApiService) {}
 
   ngOnInit(): void {
@@ -159,18 +156,4 @@ export class ConfigPage implements OnInit {
     });
   }
 
-  protected requestRestart(): void {
-    if (this.restarting()) return;
-    this.restarting.set(true);
-    this.restartRequested.set(false);
-    this.api.restartPipeline().subscribe({
-      next: () => {
-        this.restarting.set(false);
-        this.restartRequested.set(true);
-      },
-      error: () => {
-        this.restarting.set(false);
-      },
-    });
-  }
 }

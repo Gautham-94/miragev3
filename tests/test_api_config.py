@@ -30,7 +30,7 @@ def test_list_detectors_returns_default_general_detector(client):
     data = resp.json()
     assert len(data) == 1
     assert data[0]["name"] == "general"
-    assert data[0]["device"] == "onnx_yolov8"
+    assert data[0]["device"] == "onnx_rtdetr"
     assert data[0]["execution_provider"] == "cpu"  # schema default, unless configured otherwise
 
 

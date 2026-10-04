@@ -76,8 +76,8 @@ export class AddCameraPage implements OnInit {
   // gate while this is on (see ObjectsConfig.track_all's docstring), so re-disabling
   // it restores whatever was typed there without the user needing to retype it.
   protected readonly trackAll = signal(false);
-  protected readonly width = signal(640);
-  protected readonly height = signal(480);
+  protected readonly width = signal(1280);
+  protected readonly height = signal(720);
   protected readonly fps = signal(5);
   protected readonly recordEnabled = signal(true);
   protected readonly retainDays = signal(7);

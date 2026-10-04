@@ -45,11 +45,11 @@ GO2RTC_BIN_DIR = _env_path("MIRAGE_GO2RTC_BIN_DIR", _PROJECT_ROOT / "bin")
 def resolve_model_path(path: str) -> str:
     """Resolves a detector/species ModelConfig's model_path/labelmap_path field against
     MODEL_CACHE_DIR -- these fields have always been stored as plain strings shaped
-    "models/yolov8n.onnx" (see MirageConfig.default()'s seeded "general" detector), which
-    only ever worked by coincidence: `python -m mirage`'s conventional invocation from the
-    repo root makes a bare relative path like that resolve correctly against the process's
-    cwd, since MODEL_CACHE_DIR's own dev-mode default (_PROJECT_ROOT / "models") happens to
-    match. Neither assumption holds for the packaged desktop app -- there is no
+    "models/megadetector-e.onnx" (see MirageConfig.default()'s seeded "general" detector),
+    which only ever worked by coincidence: `python -m mirage`'s conventional invocation
+    from the repo root makes a bare relative path like that resolve correctly against the
+    process's cwd, since MODEL_CACHE_DIR's own dev-mode default (_PROJECT_ROOT / "models")
+    happens to match. Neither assumption holds for the packaged desktop app -- there is no
     "repo root" cwd, and confirmed live, this exact gap made the frozen build's own
     SEEDED default detector unable to find its model at all, not just a newly-added one.
 
@@ -58,11 +58,11 @@ def resolve_model_path(path: str) -> str:
     *relative* path. Note MODEL_CACHE_DIR itself already points AT the models directory
     (not its parent), while the stored strings keep their own "models/" prefix (matching
     how they've always been written/seeded) -- so this resolves against
-    MODEL_CACHE_DIR's PARENT, which is what actually makes "models/yolov8n.onnx" land at
-    MODEL_CACHE_DIR/yolov8n.onnx in both dev (parent = repo root) and frozen (parent =
-    %LOCALAPPDATA%\\Mirage, where mirage/desktop/paths.py copies the bundled models/ dir
-    to) without a doubled "models/models/..." path or a behavior change for existing
-    dev-tree configs.
+    MODEL_CACHE_DIR's PARENT, which is what actually makes "models/megadetector-e.onnx"
+    land at MODEL_CACHE_DIR/megadetector-e.onnx in both dev (parent = repo root) and
+    frozen (parent = %LOCALAPPDATA%\\Mirage, where mirage/desktop/paths.py copies the
+    bundled models/ dir to) without a doubled "models/models/..." path or a behavior
+    change for existing dev-tree configs.
 
     Every actual consumer of these fields (onnx_yolov8.py/onnx_megadetector.py's
     InferenceSession calls, load_labels()) must call this -- the raw string alone is not

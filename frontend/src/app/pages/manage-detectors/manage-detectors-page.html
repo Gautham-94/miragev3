@@ -15,51 +15,66 @@
   @if (justDeleted()) {
     <div class="restart-banner">
       <app-icon name="checkCircle" [size]="16" />
-      Detector removed. Restart <code>python -m mirage</code> for this to take effect.
+      Detector removed. Use "Apply changes" to restart the pipeline and pick this up.
     </div>
   }
   @if (justAdded()) {
     <div class="restart-banner">
       <app-icon name="checkCircle" [size]="16" />
       @if (editingDetectorName()) {
-        Detector updated. Restart <code>python -m mirage</code> for this to take effect.
+        Detector updated. Use "Apply changes" to restart the pipeline and pick this up.
       } @else {
-        Detector added. Route a camera to it (Cameras &rarr; edit), then restart <code>python -m mirage</code> for this to take effect.
+        Detector added. Route a camera to it (Cameras &rarr; edit), then use "Apply changes" to restart the pipeline and pick this up.
       }
     </div>
   }
 
   @if (showAddForm()) {
     <div class="add-form">
-      <div class="field">
-        <span>Name</span>
-        <input
-          type="text"
-          [ngModel]="name()"
-          (ngModelChange)="name.set($event)"
-          placeholder="e.g. wildlife_detector"
-          [disabled]="!!editingDetectorName()"
-        />
+      <div class="field-row">
+        <div class="field">
+          <span>Name</span>
+          <input
+            type="text"
+            [ngModel]="name()"
+            (ngModelChange)="name.set($event)"
+            placeholder="e.g. wildlife_detector"
+            [disabled]="!!editingDetectorName()"
+          />
+        </div>
+        <div class="field">
+          <span>Backend</span>
+          <div class="select-wrap">
+            <select [ngModel]="backend()" (ngModelChange)="backend.set($event)" name="backend">
+              @for (b of availableBackends(); track b) {
+                <option [value]="b">{{ b }}</option>
+              }
+            </select>
+            <app-icon name="chevronDown" [size]="14" />
+          </div>
+        </div>
       </div>
-      <div class="field">
-        <span>Model path (.onnx)</span>
-        <input
-          type="text"
-          class="mono"
-          [ngModel]="modelPath()"
-          (ngModelChange)="modelPath.set($event)"
-          placeholder="models/wildlife_yolov8.onnx"
-        />
-      </div>
-      <div class="field">
-        <span>Labelmap path</span>
-        <input
-          type="text"
-          class="mono"
-          [ngModel]="labelmapPath()"
-          (ngModelChange)="labelmapPath.set($event)"
-          placeholder="models/wildlife_labelmap.txt"
-        />
+      <div class="field-row">
+        <div class="field">
+          <span>Model path (.onnx)</span>
+          <input
+            type="text"
+            class="mono"
+            [ngModel]="modelPath()"
+            (ngModelChange)="modelPath.set($event)"
+            placeholder="models/wildlife_yolov8.onnx"
+          />
+        </div>
+        <div class="field">
+          <span>Labelmap path</span>
+          <input
+            type="text"
+            class="mono"
+            [ngModel]="labelmapPath()"
+            (ngModelChange)="labelmapPath.set($event)"
+            placeholder="models/wildlife_labelmap.txt"
+          />
+        </div>
       </div>
       <div class="field-row">
         <div class="field">
@@ -70,36 +85,18 @@
           <span>Input height</span>
           <input type="number" [ngModel]="height()" (ngModelChange)="height.set($event)" min="1" />
         </div>
-      </div>
-      <div class="field">
-        <span>Backend</span>
-        <div class="select-wrap">
-          <select [ngModel]="backend()" (ngModelChange)="backend.set($event)" name="backend">
-            @for (b of availableBackends(); track b) {
-              <option [value]="b">{{ b }}</option>
-            }
-          </select>
-          <app-icon name="chevronDown" [size]="14" />
+        <div class="field">
+          <span>Acceleration</span>
+          <div class="select-wrap">
+            <select [ngModel]="executionProvider()" (ngModelChange)="executionProvider.set($event)" name="executionProvider">
+              @for (provider of availableProviders(); track provider) {
+                <option [value]="provider">{{ providerLabel(provider) }}</option>
+              }
+            </select>
+            <app-icon name="chevronDown" [size]="14" />
+          </div>
         </div>
       </div>
-      <div class="field">
-        <span>Acceleration</span>
-        <div class="select-wrap">
-          <select [ngModel]="executionProvider()" (ngModelChange)="executionProvider.set($event)" name="executionProvider">
-            @for (provider of availableProviders(); track provider) {
-              <option [value]="provider">{{ providerLabel(provider) }}</option>
-            }
-          </select>
-          <app-icon name="chevronDown" [size]="14" />
-        </div>
-      </div>
-      <p class="hint">
-        The model file must already exist on disk at this path (relative paths resolve from wherever
-        <code>python -m mirage</code> runs). Backend must match the ONNX export format the model file actually
-        uses (mismatched output shapes silently produce garbage detections, not an error) -- see each plugin's
-        own file under <code>mirage/detection/plugins/</code> for what it expects. Acceleration options are
-        limited to what's actually available on this machine.
-      </p>
 
       @if (saveError()) {
         <div class="inline-error">{{ saveError() }}</div>

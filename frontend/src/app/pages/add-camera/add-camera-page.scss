@@ -1,7 +1,7 @@
 @use '../_page-shell';
 
 .wizard-card {
-  max-width: 560px;
+  max-width: 900px;
   background: var(--bg-raised);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
@@ -226,7 +226,12 @@
 
 .field-row {
   display: flex;
-  gap: var(--space-3);
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-5);
+
+  > .field {
+    min-width: 200px;
+  }
 }
 
 .transport-toggle {

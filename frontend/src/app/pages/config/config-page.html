@@ -9,14 +9,6 @@
   <section class="section">
     <div class="section-header">
       <h2>Detectors</h2>
-      <p>
-        Disable a detector to stop its process from running entirely -- frees the memory/CPU it would otherwise hold
-        idle. Any camera still routed to a disabled detector simply won't detect until reassigned or it's re-enabled.
-        Worker count controls how many independent copies of that detector run at once. Cameras routed to this
-        detector share one queue across all its workers, so whichever worker is free picks up the next request --
-        no camera is ever pinned to a single worker. Manage models on the <a routerLink="/detectors">Detectors</a>
-        page.
-      </p>
       @if (capabilities(); as caps) {
         <p class="capability-note">
           <app-icon name="cpu" [size]="14" />
@@ -118,11 +110,6 @@
   <section class="section">
     <div class="section-header">
       <h2>Species identification</h2>
-      <p>
-        When enabled, every animal or bird detection is additionally run through a species classifier to identify
-        what was actually seen (e.g. "white-tailed deer" instead of just "animal"). Runs locally -- nothing leaves
-        this machine. Enabled by default; turn it off to skip this extra step entirely.
-      </p>
     </div>
 
     @if (speciesLoadError()) {
@@ -160,11 +147,6 @@
   <section class="section">
     <div class="section-header">
       <h2>Hardware decode</h2>
-      <p>
-        When enabled and an NVIDIA GPU is detected, cameras automatically use it to decode video instead of the CPU
-        -- lower CPU usage, no visible difference otherwise. Falls back to software decode automatically on a
-        machine without a compatible GPU, so this is safe to leave on. Enabled by default.
-      </p>
     </div>
 
     @if (hwaccelLoadError()) {
@@ -199,39 +181,4 @@
     }
   </section>
 
-  <section class="section">
-    <div class="section-header">
-      <h2>Pipeline</h2>
-      <p>Restart the detection/recording pipeline to pick up any config changes (detector toggles, camera edits, ...).</p>
-    </div>
-
-    <div class="action-row">
-      <button type="button" class="btn-secondary" [disabled]="restarting()" (click)="requestRestart()">
-        @if (restarting()) {
-          <span class="spinner small"></span>
-        } @else {
-          <app-icon name="power" [size]="16" />
-        }
-        Restart pipeline
-      </button>
-      @if (restartRequested()) {
-        <span class="restart-note">
-          <app-icon name="checkCircle" [size]="14" />
-          Restart requested.
-        </span>
-      }
-    </div>
-  </section>
-
-  <section class="section">
-    <div class="section-header">
-      <h2>Activity</h2>
-      <p>Live feed of pipeline events -- motion, detections, and species classification.</p>
-    </div>
-    <a class="logs-link" routerLink="/logs">
-      <app-icon name="list" [size]="16" />
-      Open Logs
-      <app-icon name="chevronRight" [size]="16" />
-    </a>
-  </section>
 </div>

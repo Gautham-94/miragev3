@@ -99,18 +99,20 @@
           {{ selectedDevice()?.name || 'This device' }} needs its ONVIF username and password to look up its video stream.
         </p>
 
-        <label class="field">
-          <span>Device IP</span>
-          <input type="text" [ngModel]="onvifIp()" (ngModelChange)="onvifIp.set($event)" name="onvifIp" required />
-        </label>
-        <label class="field">
-          <span>Username</span>
-          <input type="text" [ngModel]="onvifUsername()" (ngModelChange)="onvifUsername.set($event)" name="onvifUsername" required autocomplete="off" />
-        </label>
-        <label class="field">
-          <span>Password</span>
-          <input type="password" [ngModel]="onvifPassword()" (ngModelChange)="onvifPassword.set($event)" name="onvifPassword" autocomplete="off" />
-        </label>
+        <div class="field-row">
+          <label class="field">
+            <span>Device IP</span>
+            <input type="text" [ngModel]="onvifIp()" (ngModelChange)="onvifIp.set($event)" name="onvifIp" required />
+          </label>
+          <label class="field">
+            <span>Username</span>
+            <input type="text" [ngModel]="onvifUsername()" (ngModelChange)="onvifUsername.set($event)" name="onvifUsername" required autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Password</span>
+            <input type="password" [ngModel]="onvifPassword()" (ngModelChange)="onvifPassword.set($event)" name="onvifPassword" autocomplete="off" />
+          </label>
+        </div>
 
         @if (resolveError()) {
           <div class="inline-error">{{ resolveError() }}</div>
@@ -134,10 +136,24 @@
       <form class="form" (ngSubmit)="save()">
         <span class="eyebrow">camera details</span>
 
-        <label class="field">
-          <span>Name</span>
-          <input type="text" [ngModel]="cameraName()" (ngModelChange)="cameraName.set($event)" name="cameraName" required placeholder="front_door" />
-        </label>
+        <div class="field-row">
+          <label class="field">
+            <span>Name</span>
+            <input type="text" [ngModel]="cameraName()" (ngModelChange)="cameraName.set($event)" name="cameraName" required placeholder="front_door" />
+          </label>
+
+          <label class="field">
+            <span>Detector</span>
+            <div class="select-wrap">
+              <select [ngModel]="selectedDetector()" (ngModelChange)="onDetectorChange($event)" name="detector" required>
+                @for (d of detectors(); track d.name) {
+                  <option [value]="d.name">{{ d.name }} ({{ d.model_width }}×{{ d.model_height }})</option>
+                }
+              </select>
+              <app-icon name="chevronDown" [size]="14" />
+            </div>
+          </label>
+        </div>
 
         <label class="field">
           <span>RTSP URL</span>
@@ -185,18 +201,6 @@
         </label>
 
         <label class="field">
-          <span>Detector</span>
-          <div class="select-wrap">
-            <select [ngModel]="selectedDetector()" (ngModelChange)="onDetectorChange($event)" name="detector" required>
-              @for (d of detectors(); track d.name) {
-                <option [value]="d.name">{{ d.name }} ({{ d.model_width }}×{{ d.model_height }})</option>
-              }
-            </select>
-            <app-icon name="chevronDown" [size]="14" />
-          </div>
-        </label>
-
-        <label class="field">
           <span>Track objects (comma-separated)</span>
           <input
             type="text"
@@ -218,26 +222,28 @@
           the listed labels are tracked.
         </p>
 
-        <label class="field">
-          <span>Alert labels (comma-separated)</span>
-          <input
-            type="text"
-            [ngModel]="alertLabelsInput()"
-            (ngModelChange)="alertLabelsInput.set($event)"
-            name="alertLabels"
-            placeholder="person, car, animal"
-          />
-        </label>
-        <label class="field">
-          <span>Detection labels (comma-separated)</span>
-          <input
-            type="text"
-            [ngModel]="detectionLabelsInput()"
-            (ngModelChange)="detectionLabelsInput.set($event)"
-            name="detectionLabels"
-            placeholder="bird"
-          />
-        </label>
+        <div class="field-row">
+          <label class="field">
+            <span>Alert labels (comma-separated)</span>
+            <input
+              type="text"
+              [ngModel]="alertLabelsInput()"
+              (ngModelChange)="alertLabelsInput.set($event)"
+              name="alertLabels"
+              placeholder="person, car, animal"
+            />
+          </label>
+          <label class="field">
+            <span>Detection labels (comma-separated)</span>
+            <input
+              type="text"
+              [ngModel]="detectionLabelsInput()"
+              (ngModelChange)="detectionLabelsInput.set($event)"
+              name="detectionLabels"
+              placeholder="bird"
+            />
+          </label>
+        </div>
         <p class="form-hint">
           Controls which detected labels show up on the Review/Alerts page for this camera -- a label must be listed
           here to ever appear there, even if it's already being tracked above. Alert labels get the higher-priority

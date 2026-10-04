@@ -467,23 +467,30 @@ class MirageConfig(BaseModel):
 
     @classmethod
     def default(cls) -> "MirageConfig":
-        """The config a fresh install starts from: the same 'general' ONNX YOLOv8n
-        detector config/mirage.yaml has always shipped with, and no cameras yet (that's
-        the whole point of the add-camera wizard -- there's nothing camera-specific to
-        default to).
+        """The config a fresh install starts from: a 'general' detector seeded with
+        MegaDetector-e (MDV6-apa-rtdetr-e, the latest of the two models the packaged
+        app actually bundles -- see packaging/mirage_app.spec's _MODEL_FILES; the other,
+        zilodetector, ships alongside it but isn't auto-registered, since it's a
+        wildlife-specialist alternative a user opts into via Manage Detectors, not a
+        general-purpose default), and no cameras yet (that's the whole point of the
+        add-camera wizard -- there's nothing camera-specific to default to). 640x640
+        input, NHWC/RGB/uint8, matches this model's own manifest (camera_trap__detector
+        __MDV6-apa-rtdetr-e/MDV6-apa-rtdetr-e/manifest.toml's [preprocessing] section);
+        onnx_rtdetr is the plugin backend that matches its RT-DETR top-k export shape
+        (see mirage/detection/plugins/onnx_rtdetr.py).
         """
         return cls(
             detectors={
                 "general": DetectorInstanceConfig(
                     name="general",
-                    device="onnx_yolov8",
+                    device="onnx_rtdetr",
                     model=ModelConfig(
-                        width=320,
-                        height=320,
+                        width=640,
+                        height=640,
                         input_dtype=InputDType.int_,
                         pixel_format=PixelFormat.rgb,
-                        model_path="models/yolov8n.onnx",
-                        labelmap_path="models/coco_labelmap.txt",
+                        model_path="models/megadetector-e.onnx",
+                        labelmap_path="models/megadetector-e_labels.txt",
                     ),
                 ),
             },
